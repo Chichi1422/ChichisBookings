@@ -1,3 +1,20 @@
-import { type RouteConfig, index } from "@react-router/dev/routes";
+// app/routes.ts
+import { type RouteConfig, index, route } from "@react-router/dev/routes";
 
-export default [index("routes/home.tsx")] satisfies RouteConfig;
+export default [
+  // Main pages
+  index("routes/home.tsx"),
+  
+  // API Routes
+  route("api/paypal/orders", "routes/api.paypal.orders.ts"),
+  route("api/calendar", "routes/api.calendar.ts"),
+  route("api/valr", "routes/api.valr.ts"),
+  route("api/auth/google/callback", "routes/api.auth.google.callback.ts"),
+  
+  // Booking result pages (optional - can show inline)
+  route("booking/success", "routes/booking.success.tsx"),
+  route("booking/cancel", "routes/booking.cancel.tsx"),
+  
+  // Admin page for calendar setup (optional)
+  route("admin", "routes/admin.tsx"),
+] satisfies RouteConfig;

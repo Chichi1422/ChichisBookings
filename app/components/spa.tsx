@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-
+import { BookingModal } from './BookingModel';
 interface ServiceOption {
   duration: string;
   price: number;
@@ -521,8 +521,16 @@ export function ChiChisSpa() {
           Chat with us!
         </span>
       </a>
-
-      {/* Booking Modal */}
+       
+     <BookingModal
+      isOpen={showBooking}
+      onClose={() => setShowBooking(false)}
+      selectedService={selectedService}
+      selectedOption={selectedOption}
+      isHomeCall={isHomeCall}
+      homeCallFee={homeCallFee}
+     />
+      {/* Booking Modal 
       {showBooking && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in-up">
           <div className="gradient-border rounded-3xl p-8 max-w-md w-full max-h-[90vh] overflow-y-auto animate-scale-in">
@@ -626,7 +634,7 @@ export function ChiChisSpa() {
             )}
           </div>
         </div>
-      )}
+      )}*/}
     </div>
   );
 }
