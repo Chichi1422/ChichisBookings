@@ -343,7 +343,7 @@ export function BookingModal({
             {/* Payment Method Selection */}
             <div>
               <label className="block text-sm text-white/60 mb-3">Payment Method</label>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 gap-3">
                 <button
                   onClick={() => setPaymentMethod('paypal')}
                   className={`p-4 rounded-xl border transition-all ${
@@ -356,7 +356,7 @@ export function BookingModal({
                   <div className="text-sm font-medium">PayPal</div>
                   <div className="text-xs text-white/50">Card/PayPal</div>
                 </button>
-                <button
+               {/* <button
                   onClick={() => setPaymentMethod('valr')}
                   className={`p-4 rounded-xl border transition-all ${
                     paymentMethod === 'valr'
@@ -367,7 +367,7 @@ export function BookingModal({
                   <div className="text-2xl mb-1">₿</div>
                   <div className="text-sm font-medium">Crypto</div>
                   <div className="text-xs text-white/50">VALR Pay</div>
-                </button>
+                </button> */}
                 <button
                   onClick={() => setPaymentMethod('cash')}
                   className={`p-4 rounded-xl border transition-all ${
@@ -440,7 +440,7 @@ export function BookingModal({
               </PayPalScriptProvider>
             )}
 
-            {/* VALR Payment */}
+            {/* VALR Payment 
             {paymentMethod === 'valr' && (
               <div className="bg-white/5 rounded-xl p-4">
                 {!valrPaymentInfo ? (
@@ -506,7 +506,7 @@ export function BookingModal({
                   </div>
                 )}
               </div>
-            )}
+            )} */}
 
             {/* Cash Payment */}
             {paymentMethod === 'cash' && (
