@@ -445,7 +445,7 @@ export function ChiChisSpa() {
                   </div>
                   <div>
                     <p className="text-white/50 text-sm">Location</p>
-                    <p className="text-lg">Johannesburg, South Africa</p>
+                    <p className="text-lg">Fish Hoek, South Africa</p>
                   </div>
                 </div>
               </div>
