@@ -53,4 +53,4 @@ BUSINESS_PHONE, BUSINESS_TIMEZONE
 
 ## Current Status
 - UI and booking flow are functional.
-- API integrations (PayPal, VALR, Google Calendar) are scaffolded but **not yet connected** — credentials and live testing still needed.
+- API integrations (PayPal, VALR, Google Calendar) are scaffolded and connected and tested **VALR integration hidden for now**

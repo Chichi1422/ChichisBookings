@@ -15,11 +15,11 @@ Chi Chi's Beauty Spa is a wellness business in Fish Hoek, Cape Town, South Afric
 | Pedicure (no gel) | R300 | — | — |
 | Pedicure (with gel) | R400 | — | — |
 
-Home call fee: **R150** added to any service.
+Home call fee: **R250** added to any service.
 
 ## Booking Flow
 1. Customer selects a service and duration from the services grid.
-2. Optionally toggles "Home Service" (adds R150).
+2. Optionally toggles "Home Service" (adds R250).
 3. Clicks "Continue to Book" → opens `BookingModal`.
 4. **Step 1 — Details:** Name, phone, date, time slot selection.
    - Time slots fetched from `/api/calendar?date=YYYY-MM-DD`.
