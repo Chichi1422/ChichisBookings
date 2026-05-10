@@ -8,6 +8,9 @@ export default defineConfig({
   server:{
     allowedHosts:[
       'anita-radiophonic-gametically.ngrok-free.dev',
-    ]
+    ],
+    hmr: {
+      clientPort: 443, // Forces HMR to use secure port
+    },
   }
 });
