@@ -10,47 +10,64 @@ React Router v7 full-stack web app for **Chi Chi's Beauty Spa** — a Fish Hoek,
 - **Fonts:** Playfair Display (headings), Montserrat (body)
 - **Payments:** PayPal (react-paypal-js), VALR Pay (crypto via REST API)
 - **Calendar:** Google Calendar API (googleapis)
+- **Persistence:** Supabase (Postgres + Auth) — server-side only via service role
 - **Build:** Vite 7, esbuild
-- **Deploy:** Docker / Node
+- **Deploy:** Vercel (production) via `@vercel/react-router`; Dockerfile retained as a self-host fallback
 
 ## Key Files
 | Path | Purpose |
 |---|---|
 | `app/components/spa.tsx` | Main landing page component (services, gallery, contact, booking trigger) |
-| `app/components/BookingModel.tsx` | Booking modal with multi-step flow (details → payment → confirm) |
-| `app/routes/api.paypal.orders.ts` | PayPal order create/capture (server action) |
-| `app/routes/api.valr.ts` | VALR Pay payment info generation & verification |
-| `app/routes/api.calendar.ts` | Google Calendar slot fetching & event creation |
-| `app/routes/api.auth.google.callback.ts` | Google OAuth callback |
-| `app/routes/admin.tsx` | Admin panel for calendar connection & config |
-| `app/routes/home.tsx` | Home route rendering `<ChiChisSpa />` |
-| `app/app.css` | Global styles, animations, custom utilities |
+| `app/components/BookingModel.tsx` | Booking modal — reserves slot before payment, runs countdown, confirms after capture |
+| `app/lib/supabase.server.ts` | Service-role + cookie-bound Supabase clients |
+| `app/lib/auth.server.ts` | `assertOwner(request)` — owner gate for every admin surface |
+| `app/lib/bookings.server.ts` | Reservation lifecycle (`reserveSlot`, `markPaid`, `markConfirmed`, `releaseReservation`) |
+| `app/lib/google-tokens.server.ts` | Persistent Google OAuth tokens stored in `app.oauth_tokens` |
+| `app/lib/services.server.ts` | Authoritative service catalog — server-side price lookup |
+| `app/routes/api.paypal.orders.ts` | PayPal create/capture; rejects without a live reservation; refunds on expired capture |
+| `app/routes/api.valr.ts` | VALR Pay info + verification, keyed by `reservationId` |
+| `app/routes/api.calendar.ts` | Slot fetch (DB ∪ Google), reserve/release intents, calendar event insert |
+| `app/routes/api.auth.google.callback.ts` | Owner-gated Google OAuth callback |
+| `app/routes/admin.tsx` | Admin panel — calendar connect, manual-sync queue, upcoming bookings |
+| `app/routes/admin.login.tsx` | Magic-link sign-in (only `OWNER_EMAIL` accepted) |
+| `app/routes/admin.logout.tsx` | Sign-out action |
+| `supabase/migrations/0001_init.sql` | Schema — `oauth_tokens`, `bookings` (with EXCLUDE constraint) |
+| `supabase/migrations/0002_cron_expire.sql` | `pg_cron` job that expires stale pending bookings |
 
 ## Architecture Notes
 - Routes defined in `app/routes.ts` — both pages and API endpoints.
 - API routes use `action()` with `FormData` + `intent` field for method dispatch.
-- Google Calendar tokens stored in-memory (`storedTokens`) — **must migrate to DB for production**.
-- PayPal converts ZAR → USD with a hardcoded rate — **must use live FX rate**.
+- **Persistence:** Supabase (Postgres) accessed only from server modules using `SUPABASE_SERVICE_ROLE_KEY`. Client never imports Supabase. RLS is enabled on `app.*` with no policies — anon has zero access.
+- **Google Calendar tokens** live in `app.oauth_tokens` (singleton row id=1). `getOAuthClient()` auto-refreshes and persists rotated tokens. Survives Vercel cold starts.
+- **Owner-only admin** via Supabase magic link. `OWNER_EMAIL` is the only address that can sign in. `assertOwner(request)` gates `/admin`, `getAuthUrl`/`setTokens` intents, and `/api/auth/google/callback` (so an attacker who can hit the redirect URI can't overwrite tokens).
+- **Booking concurrency:** Postgres `EXCLUDE USING gist` on `tstzrange(start_at, end_at)` enforces no double-booking atomically. Slot is reserved (`status='pending'`, TTL 10 min for PayPal/VALR, until 24h-before-appointment for cash) **before** the payment screen opens. PayPal `custom_id` carries `reservationId`; capture re-validates and refunds on expiry.
+- **Calendar failure path:** if `events.insert` fails after payment captures, the booking row stays at `status='paid'` and surfaces in the admin's "needs manual sync" list. The customer is told payment was received and confirmation will follow — never silently lied to.
+- PayPal converts ZAR → USD with a hardcoded rate — **TODO: live FX rate**.
 - VALR integration uses HMAC-SHA512 signed requests.
-- The old inline booking modal in `spa.tsx` is commented out; the `BookingModal` component is now used.
+- The old inline booking modal in `spa.tsx` is commented out; the `BookingModal` component is used.
 
 ## Environment Variables Needed
+See `.env.example` for the full list. Required:
 ```
+SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+OWNER_EMAIL
+APP_URL, BUSINESS_PHONE, BUSINESS_TIMEZONE
 PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET, PAYPAL_MODE
 VITE_PAYPAL_CLIENT_ID
 VALR_API_KEY, VALR_API_SECRET, VALR_PAY_ID
 GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, GOOGLE_CALENDAR_ID
-APP_URL
-BUSINESS_PHONE, BUSINESS_TIMEZONE
 ```
 
 ## Conventions
 - Use `FormData` + `intent` pattern for all API route actions.
-- Keep components in `app/components/`, routes in `app/routes/`.
-- Currency is ZAR (South African Rand). Display as `R{amount}`.
+- Keep components in `app/components/`, routes in `app/routes/`, server libs in `app/lib/`.
+- Server-only modules end in `.server.ts` so the bundler keeps them off the client.
+- Currency is ZAR (South African Rand). Display as `R{amount}`. Prices are looked up server-side via `app/lib/services.server.ts`; never trust client-supplied amounts.
 - WhatsApp contact: `+27633923033`.
-- Home call service adds R150 fee.
+- Home call service adds R250 fee (see `HOME_CALL_FEE_ZAR`).
 
 ## Current Status
 - UI and booking flow are functional.
-- API integrations (PayPal, VALR, Google Calendar) are scaffolded and connected and tested **VALR integration hidden for now**
+- Slot-reservation pipeline fixes the previous race condition.
+- Admin panel is owner-gated; tokens persisted in Supabase.
+- API integrations (PayPal, VALR, Google Calendar) are scaffolded and tested. **VALR integration hidden in UI for now.**

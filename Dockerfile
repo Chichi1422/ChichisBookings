@@ -1,3 +1,6 @@
+# Self-host fallback. Production deploys to Vercel via @vercel/react-router;
+# this Dockerfile is kept for environments where Vercel is not an option.
+
 FROM node:20-alpine AS development-dependencies-env
 COPY . /app
 WORKDIR /app
