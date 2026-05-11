@@ -1,7 +1,8 @@
 // app/components/BookingModal.tsx
-// Enhanced booking modal with PayPal and VALR payment integration
+// Booking modal. Slot is reserved server-side BEFORE the payment step opens —
+// if the reservation 409s the user never sees a payment UI for an unavailable slot.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { PayPalScriptProvider, PayPalButtons } from '@paypal/react-paypal-js';
 
 interface Service {
@@ -38,6 +39,12 @@ interface ValrPaymentInfo {
   businessPhone: string;
 }
 
+interface Reservation {
+  reservationId: string;
+  expiresAt: string;
+  amountZar: number;
+}
+
 export function BookingModal({
   isOpen,
   onClose,
@@ -58,19 +65,23 @@ export function BookingModal({
   const [valrPaymentInfo, setValrPaymentInfo] = useState<ValrPaymentInfo | null>(null);
   const [checkingValrPayment, setCheckingValrPayment] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reservation, setReservation] = useState<Reservation | null>(null);
+  const [reserving, setReserving] = useState(false);
+  const [secondsLeft, setSecondsLeft] = useState<number>(0);
 
-  const totalPrice = selectedOption 
-    ? selectedOption.price + (isHomeCall ? homeCallFee : 0) 
+  const totalPrice = selectedOption
+    ? selectedOption.price + (isHomeCall ? homeCallFee : 0)
     : 0;
 
-  // Fetch available time slots when date changes
+  const reservationRef = useRef<Reservation | null>(null);
+  reservationRef.current = reservation;
+
+  // Fetch available time slots when date changes.
   useEffect(() => {
-    if (bookingDate) {
-      fetchAvailableSlots(bookingDate);
-    }
+    if (bookingDate) fetchAvailableSlots(bookingDate);
   }, [bookingDate]);
 
-  // Reset state when modal opens/closes
+  // Reset state when modal opens.
   useEffect(() => {
     if (!isOpen) {
       setStep('details');
@@ -82,8 +93,42 @@ export function BookingModal({
       setTransactionId(null);
       setValrPaymentInfo(null);
       setError(null);
+      setReservation(null);
+      setSecondsLeft(0);
     }
   }, [isOpen]);
+
+  // Release the reservation if the user closes the modal mid-flow.
+  useEffect(() => {
+    if (!isOpen && reservationRef.current && step !== 'confirmed') {
+      releaseReservation(reservationRef.current.reservationId);
+    }
+  }, [isOpen]);
+
+  // Countdown ticker for the active reservation.
+  useEffect(() => {
+    if (!reservation) {
+      setSecondsLeft(0);
+      return;
+    }
+    const tick = () => {
+      const ms = new Date(reservation.expiresAt).getTime() - Date.now();
+      setSecondsLeft(Math.max(0, Math.floor(ms / 1000)));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [reservation]);
+
+  // When the countdown hits zero, surface an error and bounce back to details.
+  useEffect(() => {
+    if (reservation && secondsLeft === 0 && step === 'payment') {
+      setError('Your reservation expired. Please pick a time again.');
+      setReservation(null);
+      setStep('details');
+      if (bookingDate) fetchAvailableSlots(bookingDate);
+    }
+  }, [secondsLeft, reservation, step, bookingDate]);
 
   const fetchAvailableSlots = async (date: string) => {
     setLoadingSlots(true);
@@ -93,7 +138,6 @@ export function BookingModal({
       setAvailableSlots(data.slots || []);
     } catch (err) {
       console.error('Failed to fetch slots:', err);
-      // Fallback to default slots
       setAvailableSlots([
         { time: '09:00', display: '9:00 AM', available: true },
         { time: '10:00', display: '10:00 AM', available: true },
@@ -110,40 +154,131 @@ export function BookingModal({
     }
   };
 
-  const proceedToPayment = () => {
+  const releaseReservation = async (reservationId: string) => {
+    try {
+      const formData = new FormData();
+      formData.append('intent', 'releaseReservation');
+      formData.append('reservationId', reservationId);
+      await fetch('/api/calendar', { method: 'POST', body: formData });
+    } catch {
+      // Best-effort. The TTL will clean it up server-side.
+    }
+  };
+
+  const proceedToPayment = async () => {
     if (!customerName || !customerPhone || !bookingDate || !bookingTime) {
       setError('Please fill in all fields');
       return;
     }
     setError(null);
-    setStep('payment');
+    setReserving(true);
+    try {
+      const formData = new FormData();
+      formData.append('intent', 'reserveSlot');
+      formData.append('service', selectedService?.name || '');
+      formData.append('duration', selectedOption?.duration || '');
+      formData.append('customerName', customerName);
+      formData.append('customerPhone', customerPhone);
+      formData.append('bookingDate', bookingDate);
+      formData.append('bookingTime', bookingTime);
+      formData.append('isHomeCall', isHomeCall.toString());
+      formData.append('paymentMethod', paymentMethod);
+
+      const response = await fetch('/api/calendar', { method: 'POST', body: formData });
+      const data = await response.json();
+
+      if (response.status === 409) {
+        setError('Sorry — that time was just taken. Please pick another.');
+        await fetchAvailableSlots(bookingDate);
+        setBookingTime('');
+        return;
+      }
+      if (!response.ok) {
+        setError(data.error === 'invalid_service' ? 'Service not recognised.' : 'Could not reserve that slot.');
+        return;
+      }
+
+      setReservation({
+        reservationId: data.reservationId,
+        expiresAt: data.expiresAt,
+        amountZar: data.amountZar,
+      });
+      setStep('payment');
+    } catch (err) {
+      console.error('reserveSlot failed:', err);
+      setError('Could not reserve that slot. Please try again.');
+    } finally {
+      setReserving(false);
+    }
   };
 
-  const handlePayPalSuccess = async (transactionId: string) => {
-    setTransactionId(transactionId);
-    await createCalendarBooking(transactionId);
+  // If the user changes payment method on the payment screen, the new method
+  // affects TTL/reference, so we cancel the existing reservation and re-reserve.
+  const switchPaymentMethod = async (method: PaymentMethod) => {
+    if (method === paymentMethod) return;
+    setPaymentMethod(method);
+    if (reservation) {
+      await releaseReservation(reservation.reservationId);
+      setReservation(null);
+      setValrPaymentInfo(null);
+    }
+    // Re-reserve in the new mode. proceedToPayment reads paymentMethod from state,
+    // but state updates are batched — pass through a microtask so the new value sticks.
+    queueMicrotask(() => {
+      void rereserveWithMethod(method);
+    });
+  };
+
+  const rereserveWithMethod = async (method: PaymentMethod) => {
+    setError(null);
+    setReserving(true);
+    try {
+      const formData = new FormData();
+      formData.append('intent', 'reserveSlot');
+      formData.append('service', selectedService?.name || '');
+      formData.append('duration', selectedOption?.duration || '');
+      formData.append('customerName', customerName);
+      formData.append('customerPhone', customerPhone);
+      formData.append('bookingDate', bookingDate);
+      formData.append('bookingTime', bookingTime);
+      formData.append('isHomeCall', isHomeCall.toString());
+      formData.append('paymentMethod', method);
+
+      const response = await fetch('/api/calendar', { method: 'POST', body: formData });
+      const data = await response.json();
+      if (response.status === 409) {
+        setError('Sorry — that time was just taken. Please pick another.');
+        setStep('details');
+        await fetchAvailableSlots(bookingDate);
+        setBookingTime('');
+        return;
+      }
+      if (!response.ok) {
+        setError('Could not reserve that slot.');
+        setStep('details');
+        return;
+      }
+      setReservation({
+        reservationId: data.reservationId,
+        expiresAt: data.expiresAt,
+        amountZar: data.amountZar,
+      });
+    } finally {
+      setReserving(false);
+    }
   };
 
   const initializeValrPayment = async () => {
+    if (!reservation) return;
     try {
       const formData = new FormData();
       formData.append('intent', 'generatePaymentInfo');
-      formData.append('amount', totalPrice.toString());
-      formData.append('currency', 'ZAR');
-      formData.append('reference', `${selectedService?.name}-${customerName}`);
-      formData.append('customerName', customerName);
+      formData.append('reservationId', reservation.reservationId);
 
-      const response = await fetch('/api/valr', {
-        method: 'POST',
-        body: formData,
-      });
-
+      const response = await fetch('/api/valr', { method: 'POST', body: formData });
       const data = await response.json();
-      if (data.success) {
-        setValrPaymentInfo(data.paymentInfo);
-      } else {
-        setError('Failed to initialize VALR payment');
-      }
+      if (data.success) setValrPaymentInfo(data.paymentInfo);
+      else setError('Failed to initialize VALR payment');
     } catch (err) {
       console.error('VALR init error:', err);
       setError('Failed to initialize VALR payment');
@@ -151,24 +286,23 @@ export function BookingModal({
   };
 
   const checkValrPayment = async () => {
-    if (!valrPaymentInfo) return;
-    
+    if (!valrPaymentInfo || !reservation) return;
     setCheckingValrPayment(true);
     try {
       const formData = new FormData();
       formData.append('intent', 'checkPayment');
-      formData.append('reference', valrPaymentInfo.reference);
-      formData.append('amount', totalPrice.toString());
+      formData.append('reservationId', reservation.reservationId);
 
-      const response = await fetch('/api/valr', {
-        method: 'POST',
-        body: formData,
-      });
-
+      const response = await fetch('/api/valr', { method: 'POST', body: formData });
       const data = await response.json();
+      if (response.status === 410) {
+        setError('Your reservation expired before we saw the payment. If you paid, contact us via WhatsApp.');
+        return;
+      }
       if (data.found) {
-        setTransactionId(data.payment.id);
-        await createCalendarBooking(data.payment.id);
+        setTransactionId(data.payment?.id ?? null);
+        setStep(data.success ? 'confirmed' : 'processing');
+        if (!data.success) setError('Payment received but calendar sync is pending. We will confirm shortly.');
       } else {
         setError('Payment not found yet. Please ensure the payment was completed with the correct reference.');
       }
@@ -180,52 +314,54 @@ export function BookingModal({
   };
 
   const handleCashBooking = async () => {
-    setStep('processing');
-    await createCalendarBooking('CASH-PENDING');
-  };
-
-  const createCalendarBooking = async (txId: string) => {
+    if (!reservation) return;
     setStep('processing');
     try {
       const formData = new FormData();
-      formData.append('intent', 'createBooking');
-      formData.append('service', selectedService?.name || '');
-      formData.append('duration', selectedOption?.duration || '');
-      formData.append('customerName', customerName);
-      formData.append('customerPhone', customerPhone);
-      formData.append('bookingDate', bookingDate);
-      formData.append('bookingTime', bookingTime);
-      formData.append('isHomeCall', isHomeCall.toString());
-      formData.append('paymentMethod', paymentMethod);
-      formData.append('transactionId', txId);
-
-      const response = await fetch('/api/calendar', {
-        method: 'POST',
-        body: formData,
-      });
-
+      formData.append('intent', 'confirmCashBooking');
+      formData.append('reservationId', reservation.reservationId);
+      const response = await fetch('/api/calendar', { method: 'POST', body: formData });
       const data = await response.json();
-      if (data.success) {
-        setTransactionId(txId);
-        setStep('confirmed');
-      } else {
-        setError('Booking created but calendar sync failed. We will contact you to confirm.');
-        setStep('confirmed');
+      if (response.status === 410) {
+        setError('Your reservation expired. Please try again.');
+        setStep('details');
+        return;
       }
-    } catch (err) {
-      setError('Failed to create booking. Please contact us directly.');
-      setStep('confirmed');
+      if (data.success) {
+        setTransactionId('CASH-PENDING');
+        setStep('confirmed');
+        if (data.warning) {
+          setError('Booking saved — calendar sync will follow.');
+        }
+      } else {
+        setError('Could not confirm cash booking. Please contact us directly.');
+        setStep('payment');
+      }
+    } catch {
+      setError('Could not confirm cash booking. Please contact us directly.');
+      setStep('payment');
     }
   };
 
-  // Initialize VALR payment when selected
-  useEffect(() => {
-    if (step === 'payment' && paymentMethod === 'valr' && !valrPaymentInfo) {
-      initializeValrPayment();
+  const handlePayPalSuccess = (txId: string, warning?: string) => {
+    setTransactionId(txId);
+    if (warning === 'payment_received_calendar_pending') {
+      setError('Payment received — calendar sync is pending. We will confirm via WhatsApp shortly.');
     }
-  }, [step, paymentMethod]);
+    setStep('confirmed');
+  };
+
+  // Trigger VALR init when entering the VALR payment screen.
+  useEffect(() => {
+    if (step === 'payment' && paymentMethod === 'valr' && !valrPaymentInfo && reservation) {
+      void initializeValrPayment();
+    }
+  }, [step, paymentMethod, reservation]);
 
   if (!isOpen || !selectedService || !selectedOption) return null;
+
+  const minutesLeft = Math.floor(secondsLeft / 60);
+  const remainderSecs = secondsLeft % 60;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
@@ -238,7 +374,7 @@ export function BookingModal({
             {step === 'processing' && 'Processing...'}
             {step === 'confirmed' && 'Booking Confirmed!'}
           </h3>
-          <button 
+          <button
             onClick={onClose}
             className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
           >
@@ -253,10 +389,19 @@ export function BookingModal({
           <p className="text-white/50 text-sm mb-1">Selected Treatment</p>
           <p className="font-semibold">{selectedService.name}</p>
           <p className="text-[#f48fb1]">
-            {selectedOption.duration} • R{totalPrice} 
+            {selectedOption.duration} • R{totalPrice}
             {isHomeCall && <span className="text-white/40 text-sm ml-2">(incl. home service)</span>}
           </p>
         </div>
+
+        {/* Reservation countdown */}
+        {step === 'payment' && reservation && (
+          <div className="bg-[#f48fb1]/10 border border-[#f48fb1]/30 rounded-xl p-3 mb-4 text-center">
+            <p className="text-sm text-[#f48fb1]">
+              Slot held for {minutesLeft}:{String(remainderSecs).padStart(2, '0')} — finish payment to confirm.
+            </p>
+          </div>
+        )}
 
         {error && (
           <div className="bg-red-500/20 border border-red-500/50 rounded-xl p-4 mb-6">
@@ -269,8 +414,8 @@ export function BookingModal({
           <div className="space-y-4">
             <div>
               <label className="block text-sm text-white/60 mb-2">Your Name</label>
-              <input 
-                type="text" 
+              <input
+                type="text"
                 value={customerName}
                 onChange={(e) => setCustomerName(e.target.value)}
                 placeholder="Enter your full name"
@@ -280,8 +425,8 @@ export function BookingModal({
 
             <div>
               <label className="block text-sm text-white/60 mb-2">Phone Number</label>
-              <input 
-                type="tel" 
+              <input
+                type="tel"
                 value={customerPhone}
                 onChange={(e) => setCustomerPhone(e.target.value)}
                 placeholder="e.g. 063 123 4567"
@@ -291,13 +436,43 @@ export function BookingModal({
 
             <div>
               <label className="block text-sm text-white/60 mb-2">Preferred Date</label>
-              <input 
-                type="date" 
+              <input
+                type="date"
                 value={bookingDate}
                 onChange={(e) => setBookingDate(e.target.value)}
                 min={new Date().toISOString().split('T')[0]}
                 className="w-full px-4 py-3 bg-white/5 border border-white/10 rounded-xl focus:outline-none focus:border-[#f48fb1]/50 transition-colors"
               />
+            </div>
+
+            <div>
+              <label className="block text-sm text-white/60 mb-2">Payment Method</label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('paypal')}
+                  className={`p-3 rounded-xl border transition-all ${
+                    paymentMethod === 'paypal'
+                      ? 'border-[#f48fb1] bg-[#f48fb1]/10'
+                      : 'border-white/10 hover:border-white/30'
+                  }`}
+                >
+                  <div className="text-xl mb-1">💳</div>
+                  <div className="text-sm font-medium">PayPal</div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPaymentMethod('cash')}
+                  className={`p-3 rounded-xl border transition-all ${
+                    paymentMethod === 'cash'
+                      ? 'border-[#f48fb1] bg-[#f48fb1]/10'
+                      : 'border-white/10 hover:border-white/30'
+                  }`}
+                >
+                  <div className="text-xl mb-1">💵</div>
+                  <div className="text-sm font-medium">Cash</div>
+                </button>
+              </div>
             </div>
 
             <div>
@@ -313,11 +488,11 @@ export function BookingModal({
                       disabled={!slot.available}
                       onClick={() => setBookingTime(slot.time)}
                       className={`py-2 rounded-lg border transition-all ${
-                        bookingTime === slot.time 
-                          ? 'bg-[#f48fb1] border-[#f48fb1] text-[#0a0a0a] font-semibold' 
+                        bookingTime === slot.time
+                          ? 'bg-[#f48fb1] border-[#f48fb1] text-[#0a0a0a] font-semibold'
                           : slot.available
-                            ? 'border-white/10 hover:border-[#f48fb1]/50'
-                            : 'border-white/5 text-white/30 cursor-not-allowed'
+                          ? 'border-white/10 hover:border-[#f48fb1]/50'
+                          : 'border-white/5 text-white/30 cursor-not-allowed'
                       }`}
                     >
                       {slot.display}
@@ -327,12 +502,12 @@ export function BookingModal({
               )}
             </div>
 
-            <button 
+            <button
               onClick={proceedToPayment}
-              disabled={!customerName || !customerPhone || !bookingDate || !bookingTime}
+              disabled={!customerName || !customerPhone || !bookingDate || !bookingTime || reserving}
               className="w-full py-4 bg-[#f48fb1] text-[#0a0a0a] font-semibold rounded-xl hover:bg-[#f8bbd9] transition-all disabled:opacity-50 disabled:cursor-not-allowed mt-6"
             >
-              Continue to Payment
+              {reserving ? 'Holding your slot…' : 'Continue to Payment'}
             </button>
           </div>
         )}
@@ -340,12 +515,12 @@ export function BookingModal({
         {/* Step: Payment */}
         {step === 'payment' && (
           <div className="space-y-6">
-            {/* Payment Method Selection */}
+            {/* Method switcher (lets user change PayPal ↔ Cash without losing the slot — re-reserves under the hood) */}
             <div>
               <label className="block text-sm text-white/60 mb-3">Payment Method</label>
               <div className="grid grid-cols-2 gap-3">
                 <button
-                  onClick={() => setPaymentMethod('paypal')}
+                  onClick={() => switchPaymentMethod('paypal')}
                   className={`p-4 rounded-xl border transition-all ${
                     paymentMethod === 'paypal'
                       ? 'border-[#f48fb1] bg-[#f48fb1]/10'
@@ -356,20 +531,8 @@ export function BookingModal({
                   <div className="text-sm font-medium">PayPal</div>
                   <div className="text-xs text-white/50">Card/PayPal</div>
                 </button>
-               {/* <button
-                  onClick={() => setPaymentMethod('valr')}
-                  className={`p-4 rounded-xl border transition-all ${
-                    paymentMethod === 'valr'
-                      ? 'border-[#f48fb1] bg-[#f48fb1]/10'
-                      : 'border-white/10 hover:border-white/30'
-                  }`}
-                >
-                  <div className="text-2xl mb-1">₿</div>
-                  <div className="text-sm font-medium">Crypto</div>
-                  <div className="text-xs text-white/50">VALR Pay</div>
-                </button> */}
                 <button
-                  onClick={() => setPaymentMethod('cash')}
+                  onClick={() => switchPaymentMethod('cash')}
                   className={`p-4 rounded-xl border transition-all ${
                     paymentMethod === 'cash'
                       ? 'border-[#f48fb1] bg-[#f48fb1]/10'
@@ -384,11 +547,13 @@ export function BookingModal({
             </div>
 
             {/* PayPal Payment */}
-            {paymentMethod === 'paypal' && (
-              <PayPalScriptProvider options={{ 
-                clientId: import.meta.env.VITE_PAYPAL_CLIENT_ID || 'test',
-                currency: 'USD',
-              }}>
+            {paymentMethod === 'paypal' && reservation && (
+              <PayPalScriptProvider
+                options={{
+                  clientId: import.meta.env.VITE_PAYPAL_CLIENT_ID || 'test',
+                  currency: 'USD',
+                }}
+              >
                 <div className="bg-white/5 rounded-xl p-4">
                   <p className="text-sm text-white/60 mb-4">
                     Pay securely with PayPal or credit/debit card
@@ -398,20 +563,14 @@ export function BookingModal({
                     createOrder={async () => {
                       const formData = new FormData();
                       formData.append('intent', 'create');
-                      formData.append('service', selectedService?.name || '');
-                      formData.append('duration', selectedOption?.duration || '');
-                      formData.append('amount', totalPrice.toString());
-                      formData.append('customerName', customerName);
-                      formData.append('customerPhone', customerPhone);
-                      formData.append('bookingDate', bookingDate);
-                      formData.append('bookingTime', bookingTime);
-                      formData.append('isHomeCall', isHomeCall.toString());
+                      formData.append('reservationId', reservation.reservationId);
 
                       const response = await fetch('/api/paypal/orders', {
                         method: 'POST',
                         body: formData,
                       });
                       const data = await response.json();
+                      if (!response.ok) throw new Error(data.error || 'create_order_failed');
                       return data.orderID;
                     }}
                     onApprove={async (data) => {
@@ -424,12 +583,23 @@ export function BookingModal({
                         body: formData,
                       });
                       const result = await response.json();
-                      
-                      if (result.success) {
-                        handlePayPalSuccess(result.transactionId);
-                      } else {
-                        setError('Payment capture failed. Please try again.');
+
+                      if (response.status === 410) {
+                        setError(
+                          result.refunded
+                            ? 'Your reservation expired and the payment was refunded. Please book again.'
+                            : 'Your reservation expired. Please book again.',
+                        );
+                        setStep('details');
+                        await fetchAvailableSlots(bookingDate);
+                        setBookingTime('');
+                        return;
                       }
+                      if (!response.ok || !result.success) {
+                        setError('Payment capture failed. Please try again.');
+                        return;
+                      }
+                      handlePayPalSuccess(result.transactionId, result.warning);
                     }}
                     onError={(err) => {
                       console.error('PayPal error:', err);
@@ -439,74 +609,6 @@ export function BookingModal({
                 </div>
               </PayPalScriptProvider>
             )}
-
-            {/* VALR Payment 
-            {paymentMethod === 'valr' && (
-              <div className="bg-white/5 rounded-xl p-4">
-                {!valrPaymentInfo ? (
-                  <div className="text-center py-4">
-                    <div className="animate-spin w-8 h-8 border-2 border-[#f48fb1] border-t-transparent rounded-full mx-auto mb-2" />
-                    <p className="text-white/60">Generating payment details...</p>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <p className="text-sm text-white/60">
-                      Pay with VALR Pay using ZAR or cryptocurrency
-                    </p>
-                    
-                    <div className="bg-white/5 rounded-lg p-4">
-                      <div className="text-center mb-4">
-                        <p className="text-sm text-white/50">Amount Due</p>
-                        <p className="text-3xl font-bold text-[#f48fb1]">R{totalPrice.toFixed(2)}</p>
-                      </div>
-                      
-                      {valrPaymentInfo.cryptoOptions.BTC && (
-                        <div className="text-sm text-white/60 text-center mb-4">
-                          or ≈ {valrPaymentInfo.cryptoOptions.BTC.amount} BTC
-                          {valrPaymentInfo.cryptoOptions.ETH && ` / ${valrPaymentInfo.cryptoOptions.ETH.amount} ETH`}
-                        </div>
-                      )}
-                      
-                      <div className="bg-[#0a0a0a] rounded-lg p-3 mb-4">
-                        <p className="text-xs text-white/50 mb-1">Payment Reference (required)</p>
-                        <p className="font-mono text-sm text-[#f48fb1] break-all">{valrPaymentInfo.reference}</p>
-                      </div>
-                      
-                      <div className="space-y-2">
-                        {valrPaymentInfo.instructions.map((instruction, i) => (
-                          <p key={i} className="text-xs text-white/60">{instruction}</p>
-                        ))}
-                      </div>
-                    </div>
-                    
-                    <div className="flex gap-3">
-                      <a
-                        href={valrPaymentInfo.deepLink}
-                        className="flex-1 py-3 bg-[#00d4aa] text-[#0a0a0a] font-semibold rounded-xl text-center hover:bg-[#00e4ba] transition-colors"
-                      >
-                        Open VALR App
-                      </a>
-                      <a
-                        href={valrPaymentInfo.webLink}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="flex-1 py-3 border border-white/20 text-white rounded-xl text-center hover:bg-white/5 transition-colors"
-                      >
-                        Pay on Web
-                      </a>
-                    </div>
-                    
-                    <button
-                      onClick={checkValrPayment}
-                      disabled={checkingValrPayment}
-                      className="w-full py-4 bg-[#f48fb1] text-[#0a0a0a] font-semibold rounded-xl hover:bg-[#f8bbd9] transition-all disabled:opacity-50"
-                    >
-                      {checkingValrPayment ? 'Checking...' : "I've Made the Payment"}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )} */}
 
             {/* Cash Payment */}
             {paymentMethod === 'cash' && (
@@ -521,7 +623,8 @@ export function BookingModal({
                 </div>
                 <button
                   onClick={handleCashBooking}
-                  className="w-full py-4 bg-[#f48fb1] text-[#0a0a0a] font-semibold rounded-xl hover:bg-[#f8bbd9] transition-all"
+                  disabled={!reservation || reserving}
+                  className="w-full py-4 bg-[#f48fb1] text-[#0a0a0a] font-semibold rounded-xl hover:bg-[#f8bbd9] transition-all disabled:opacity-50"
                 >
                   Reserve Appointment
                 </button>
@@ -529,7 +632,11 @@ export function BookingModal({
             )}
 
             <button
-              onClick={() => setStep('details')}
+              onClick={async () => {
+                if (reservation) await releaseReservation(reservation.reservationId);
+                setReservation(null);
+                setStep('details');
+              }}
               className="w-full py-3 border border-white/20 text-white rounded-xl hover:bg-white/5 transition-all"
             >
               ← Back to Details
@@ -555,21 +662,27 @@ export function BookingModal({
             </div>
             <h3 className="font-playfair text-2xl mb-2">Booking Confirmed!</h3>
             <p className="text-white/60 mb-4">
-              {paymentMethod === 'cash' 
+              {paymentMethod === 'cash'
                 ? "We'll see you soon! Please remember to bring cash."
                 : "Thank you for your payment. We'll see you soon!"}
             </p>
             <div className="bg-white/5 rounded-xl p-4 text-left mb-6">
-              <p className="text-sm"><span className="text-white/50">Date:</span> {bookingDate}</p>
-              <p className="text-sm"><span className="text-white/50">Time:</span> {bookingTime}</p>
-              <p className="text-sm"><span className="text-white/50">Service:</span> {selectedService?.name}</p>
+              <p className="text-sm">
+                <span className="text-white/50">Date:</span> {bookingDate}
+              </p>
+              <p className="text-sm">
+                <span className="text-white/50">Time:</span> {bookingTime}
+              </p>
+              <p className="text-sm">
+                <span className="text-white/50">Service:</span> {selectedService?.name}
+              </p>
               {transactionId && transactionId !== 'CASH-PENDING' && (
-                <p className="text-sm"><span className="text-white/50">Transaction:</span> {transactionId}</p>
+                <p className="text-sm">
+                  <span className="text-white/50">Transaction:</span> {transactionId}
+                </p>
               )}
             </div>
-            <p className="text-white/40 text-sm mb-4">
-              You'll receive a confirmation via WhatsApp
-            </p>
+            <p className="text-white/40 text-sm mb-4">You'll receive a confirmation via WhatsApp</p>
             <button
               onClick={onClose}
               className="w-full py-4 bg-[#f48fb1] text-[#0a0a0a] font-semibold rounded-xl hover:bg-[#f8bbd9] transition-all"
