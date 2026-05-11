@@ -53,7 +53,7 @@ The authoritative price catalog lives in [`app/lib/services.server.ts`](app/lib/
             [confirmed]
 ```
 
-User-cancel paths set `status='cancelled'`. The exclusion-constraint predicate ignores cancelled/expired/confirmed-in-the-past rows so the slot frees up immediately.
+User-cancel paths set `status='cancelled'`. The exclusion-constraint predicate only considers rows in `('pending','paid','confirmed')`, so cancelled/expired rows free the slot immediately. A `BEFORE INSERT` trigger (`app.expire_overlapping_stale_pending`) flips any time-overlapping `pending` rows whose `expires_at` has passed to `expired` just before the constraint check, so a lapsed TTL never blocks the next booking. A `pg_cron` job sweeps the rest every 5 minutes for hygiene.
 
 ## Trust Boundary
 - The browser **never** talks to Supabase directly. All persistence goes through React Router actions/loaders using the `SUPABASE_SERVICE_ROLE_KEY`.

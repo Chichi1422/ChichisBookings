@@ -43,20 +43,44 @@ create table if not exists app.bookings (
   google_event_id      text,
   created_at           timestamptz not null default now(),
   expires_at           timestamptz not null,
-  -- Atomic double-booking prevention. Only "live" rows participate;
-  -- expired pending rows are excluded so their slots free up automatically.
+  -- Atomic double-booking prevention. Only live statuses participate;
+  -- expired/cancelled rows are excluded. (We cannot reference now() here —
+  -- index predicates must be IMMUTABLE — so the stale-pending sweep happens
+  -- in a BEFORE INSERT trigger below.)
   constraint bookings_no_overlap exclude using gist (
     tstzrange(start_at, end_at, '[)') with &&
-  ) where (
-    status in ('pending','paid','confirmed')
-    and (status <> 'pending' or expires_at > now())
-  )
+  ) where (status in ('pending','paid','confirmed'))
 );
 
 create index if not exists bookings_date_idx
   on app.bookings (booking_date);
 create index if not exists bookings_status_expires_idx
   on app.bookings (status, expires_at);
+
+-- Before every insert, expire any stale `pending` rows whose time range
+-- overlaps the incoming row. This frees the slot just-in-time so the
+-- exclusion constraint doesn't reject a legitimate booking because the
+-- previous customer's reservation TTL has lapsed but the cron hygiene job
+-- hasn't swept yet.
+create or replace function app.expire_overlapping_stale_pending()
+returns trigger
+language plpgsql
+as $$
+begin
+  update app.bookings
+     set status = 'expired'
+   where status = 'pending'
+     and expires_at < now()
+     and tstzrange(start_at, end_at, '[)')
+         && tstzrange(NEW.start_at, NEW.end_at, '[)');
+  return NEW;
+end;
+$$;
+
+drop trigger if exists expire_overlapping_stale_pending on app.bookings;
+create trigger expire_overlapping_stale_pending
+before insert on app.bookings
+for each row execute function app.expire_overlapping_stale_pending();
 
 alter table app.oauth_tokens enable row level security;
 alter table app.bookings     enable row level security;
