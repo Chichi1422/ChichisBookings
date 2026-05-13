@@ -120,14 +120,19 @@ export function BookingModal({
     return () => window.clearInterval(id);
   }, [reservation]);
 
-  // When the countdown hits zero, surface an error and bounce back to details.
+  // When the reservation actually expires, surface an error and bounce back
+  // to details. We check `expiresAt` directly instead of `secondsLeft` — the
+  // ticker that updates `secondsLeft` runs in a separate effect, and on the
+  // first render after `proceedToPayment` the displayed `secondsLeft` is
+  // still its initial 0 from useState. Relying on that would (and did) fire
+  // a bogus "expired" the instant the payment step opened.
   useEffect(() => {
-    if (reservation && secondsLeft === 0 && step === 'payment') {
-      setError('Your reservation expired. Please pick a time again.');
-      setReservation(null);
-      setStep('details');
-      if (bookingDate) fetchAvailableSlots(bookingDate);
-    }
+    if (!reservation || step !== 'payment') return;
+    if (new Date(reservation.expiresAt).getTime() > Date.now()) return;
+    setError('Your reservation expired. Please pick a time again.');
+    setReservation(null);
+    setStep('details');
+    if (bookingDate) fetchAvailableSlots(bookingDate);
   }, [secondsLeft, reservation, step, bookingDate]);
 
   const fetchAvailableSlots = async (date: string) => {

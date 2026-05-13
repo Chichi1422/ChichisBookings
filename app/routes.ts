@@ -9,7 +9,6 @@ export default [
   route("api/paypal/orders", "routes/api.paypal.orders.ts"),
   route("api/calendar", "routes/api.calendar.ts"),
   route("api/valr", "routes/api.valr.ts"),
-  route("api/auth/google/callback", "routes/api.auth.google.callback.ts"),
   route("auth/callback", "routes/auth.callback.ts"),
 
   // Booking result pages (optional - can show inline)

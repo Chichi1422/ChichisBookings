@@ -14,6 +14,7 @@
 - **Supabase SSR helpers:** https://supabase.com/docs/guides/auth/server-side
 - **Postgres `EXCLUDE` constraints:** https://www.postgresql.org/docs/current/sql-createtable.html#SQL-CREATETABLE-EXCLUDE
 - **`pg_cron` on Supabase:** https://supabase.com/docs/guides/database/extensions/pg_cron
+- **Supabase explicit grants rollout (2026-05-30 / 2026-10-30):** new and existing projects will stop auto-granting Data API access on table creation. `supabase/migrations/0003_grants.sql` adds the explicit `service_role` grants (and `ALTER DEFAULT PRIVILEGES`) needed for `app.*` to keep working past those dates.
 
 ## Payment APIs
 
@@ -38,8 +39,10 @@
 - **Calendar API Docs:** https://developers.google.com/calendar/api/v3/reference
 - **Node.js Quickstart:** https://developers.google.com/calendar/api/quickstart/nodejs
 - **googleapis npm:** https://www.npmjs.com/package/googleapis
-- **OAuth 2.0 Scopes:** `https://www.googleapis.com/auth/calendar`
-- **Google Cloud Console:** https://console.cloud.google.com/
+- **Service accounts overview:** https://cloud.google.com/iam/docs/service-account-overview
+- **Authenticate via GoogleAuth with a service account JSON key:** https://cloud.google.com/nodejs/docs/reference/google-auth-library/latest
+- **Calendar access scope:** `https://www.googleapis.com/auth/calendar`
+- **Google Cloud Console — Service Accounts:** https://console.cloud.google.com/iam-admin/serviceaccounts
 
 ## Currency & Exchange
 
@@ -55,12 +58,12 @@
 
 - [x] Add PayPal credentials to `.env` and test sandbox flow end-to-end
 - [x] Add VALR API keys to `.env` and test payment info generation + verification
-- [x] Set up Google Cloud project, enable Calendar API, create OAuth credentials
-- [x] Connect Google Calendar from `/admin` page and test booking creation
+- [x] Set up Google Cloud project, enable Calendar API, create a service account, download its JSON key, share the target calendar with the service account's `client_email`
+- [x] Configure `GOOGLE_SERVICE_ACCOUNT_JSON` + `GOOGLE_CALENDAR_ID` env vars and confirm green status in `/admin`
 - [ ] Replace hardcoded ZAR→USD rate with live exchange rate API (PayPal flow)
-- [x] Persist Google Calendar tokens in a database (Supabase `app.oauth_tokens`)
 - [x] Owner-only admin access (Supabase magic link, gated by `OWNER_EMAIL`)
 - [x] Atomic slot reservation to prevent double-bookings (Postgres `EXCLUDE` on `tstzrange`)
+- [ ] Drop `app.oauth_tokens` table in a future migration (left in place from the OAuth-based implementation)
 - [ ] Add WhatsApp notification (e.g., via Twilio or WhatsApp Business API)
 - [ ] Add input validation and rate limiting on API routes
 - [ ] Run `supabase db push` (or apply `supabase/migrations/*.sql` in the dashboard) against the production project

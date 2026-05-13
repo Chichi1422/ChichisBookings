@@ -1,12 +1,8 @@
 // app/routes/api.calendar.ts
-// Google Calendar integration + slot reservation lifecycle.
+// Google Calendar integration + slot reservation lifecycle. Calendar access
+// is via a server-side service account — no OAuth, no per-owner tokens.
 
-import { assertOwner } from '~/lib/auth.server';
-import {
-  buildAuthUrl,
-  exchangeCodeForTokens,
-  isCalendarConnected,
-} from '~/lib/google-tokens.server';
+import { isCalendarConfigured } from '~/lib/google.server';
 import {
   getLiveBookingRanges,
   markPaid,
@@ -49,21 +45,6 @@ export async function action({ request }: { request: Request }) {
     // "Reserve Appointment" — there's no payment provider to call back.
     case 'confirmCashBooking':
       return handleConfirmCashBooking(formData);
-    case 'getAuthUrl':
-      await assertOwner(request);
-      return Response.json({ url: buildAuthUrl() });
-    case 'setTokens': {
-      // Owner-only. Used by the OAuth callback after exchanging the code.
-      await assertOwner(request);
-      const code = formData.get('code') as string;
-      try {
-        await exchangeCodeForTokens(code);
-        return Response.json({ success: true });
-      } catch (err) {
-        console.error('[api.calendar] setTokens failed:', err);
-        return Response.json({ error: 'Failed to authenticate' }, { status: 500 });
-      }
-    }
     default:
       return Response.json({ error: 'Invalid intent' }, { status: 400 });
   }
@@ -88,15 +69,16 @@ async function getAvailableSlotsForDate(dateStr: string): Promise<Response> {
   // whether Google Calendar is connected.
   const dbRanges = await getLiveBookingRanges(dateStr);
 
-  // Google Calendar ranges — best-effort. If the calendar isn't connected
-  // we still honour DB reservations so the booking flow works in dev.
+  // Google Calendar ranges — best-effort. If the service account isn't
+  // configured we still honour DB reservations so the booking flow works
+  // in dev.
   let googleRanges: Array<{ start: Date; end: Date }> = [];
   let warning: string | undefined;
   try {
-    if (await isCalendarConnected()) {
+    if (isCalendarConfigured()) {
       googleRanges = await fetchGoogleEventsForDate(dateStr);
     } else {
-      warning = 'Calendar not connected — only DB reservations are checked';
+      warning = 'Calendar not configured — only DB reservations are checked';
     }
   } catch (err) {
     console.error('[api.calendar] google fetch failed:', err);
