@@ -39,7 +39,7 @@ export async function action({ request }: ActionFunctionArgs) {
   const { supabase, headers } = getSupabaseServerClient(request);
   const { error } = await supabase.auth.signInWithOtp({
     email,
-    options: { emailRedirectTo: `${appUrl}/admin` },
+    options: { emailRedirectTo: `${appUrl}/auth/callback?next=/admin` },
   });
 
   if (error) {
