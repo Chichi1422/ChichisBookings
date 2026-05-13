@@ -62,9 +62,9 @@ User-cancel paths set `status='cancelled'`. The exclusion-constraint predicate o
 
 ## Data Model
 
-`app.oauth_tokens` (singleton, id=1) — Google Calendar refresh + access tokens. Auto-refreshed and persisted on rotation.
-
 `app.bookings` — every reservation, paid booking, and confirmed booking. Status enum: `pending → paid → confirmed | expired | cancelled`. The `bookings_no_overlap` exclusion constraint is the single source of truth for slot availability.
+
+`app.oauth_tokens` — legacy table from the original OAuth implementation. Empty/unused under the service-account model; left in place to keep migrations linear. Safe to drop in a future migration once you're sure you won't roll back.
 
 ## Payment Integration Details
 
@@ -86,11 +86,15 @@ User-cancel paths set `status='cancelled'`. The exclusion-constraint predicate o
 - Reservation TTL is set to 24h before the appointment so the owner can confirm manually.
 
 ## Google Calendar Integration
-- OAuth 2.0 flow initiated from `/admin` (owner-gated).
-- Callback at `/api/auth/google/callback` exchanges code for tokens. Owner-gated so an attacker hitting the redirect URI cannot overwrite the spa's tokens.
-- Tokens persisted in `app.oauth_tokens` (Supabase) — survive Vercel cold starts.
-- Events created with service details, customer info, payment method, and reservation id in description.
-- Color-coded: orange for home calls, green for in-spa.
+- Server-side **service account** — no OAuth, no per-owner consent flow, no refresh tokens to rotate.
+- Setup (one-time):
+  1. Google Cloud → IAM → Service Accounts → create one for the spa (no roles required).
+  2. Keys → Add key → JSON → download.
+  3. In Google Calendar, share the booking calendar with the service account's `client_email` and grant "Make changes to events".
+  4. Set `GOOGLE_SERVICE_ACCOUNT_JSON` to the JSON contents and `GOOGLE_CALENDAR_ID` to the calendar id (the long `...@group.calendar.google.com` string, not `primary`).
+- `app/lib/google.server.ts` constructs the client via `google.auth.GoogleAuth({ credentials, scopes: [calendar] })`. The client is cached per-function-instance; GoogleAuth handles internal token caching.
+- Events created with service details, customer info, payment method, and reservation id in description. Color-coded: orange for home calls, green for in-spa.
+- `verifyCalendarAccess()` (called by the admin loader) does a cheap `calendars.get` to confirm the share/permissions are correct and surfaces the error message directly in the admin UI.
 
 ## Contact
 - Phone/WhatsApp: 063 392 3033

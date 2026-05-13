@@ -5,7 +5,7 @@ import { useState } from 'react';
 import { Form, Link, useLoaderData, useSearchParams } from 'react-router';
 import type { LoaderFunctionArgs } from 'react-router';
 import { assertOwner } from '~/lib/auth.server';
-import { isCalendarConnected } from '~/lib/google-tokens.server';
+import { isCalendarConfigured, verifyCalendarAccess } from '~/lib/google.server';
 import {
   getNeedsManualSync,
   getUpcomingBookings,
@@ -16,9 +16,14 @@ export function meta() {
   return [{ title: "Admin | Chi Chi's Beauty Spa" }];
 }
 
+interface CalendarStatus {
+  configured: boolean;
+  error: string | null;
+}
+
 interface LoaderData {
   ownerEmail: string;
-  calendarConnected: boolean;
+  calendar: CalendarStatus;
   needsManualSync: BookingRow[];
   upcoming: BookingRow[];
 }
@@ -26,8 +31,9 @@ interface LoaderData {
 export async function loader({ request }: LoaderFunctionArgs) {
   const session = await assertOwner(request);
 
-  const [calendarConnected, needsManualSync, upcoming] = await Promise.all([
-    isCalendarConnected(),
+  const configured = isCalendarConfigured();
+  const [calendarError, needsManualSync, upcoming] = await Promise.all([
+    configured ? verifyCalendarAccess() : Promise.resolve('not_configured'),
     getNeedsManualSync(),
     getUpcomingBookings(25),
   ]);
@@ -35,7 +41,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
   return new Response(
     JSON.stringify({
       ownerEmail: session.email,
-      calendarConnected,
+      calendar: {
+        configured,
+        error: calendarError === 'not_configured' ? null : calendarError,
+      },
       needsManualSync,
       upcoming,
     } satisfies LoaderData),
@@ -48,30 +57,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
 export default function Admin() {
   const data = useLoaderData<typeof loader>() as LoaderData;
   const [searchParams] = useSearchParams();
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(() => {
-    const success = searchParams.get('success');
+  const [message] = useState<{ type: 'success' | 'error'; text: string } | null>(() => {
     const error = searchParams.get('error');
-    if (success === 'calendar_connected') return { type: 'success', text: 'Google Calendar connected.' };
-    if (error) return { type: 'error', text: `Authentication failed: ${error}` };
+    if (error) return { type: 'error', text: `Error: ${error}` };
     return null;
   });
 
-  const connectCalendar = async () => {
-    setLoading(true);
-    try {
-      const formData = new FormData();
-      formData.append('intent', 'getAuthUrl');
-      const response = await fetch('/api/calendar', { method: 'POST', body: formData });
-      const data = await response.json();
-      if (data.url) window.location.href = data.url;
-      else setMessage({ type: 'error', text: 'Failed to get authentication URL' });
-    } catch {
-      setMessage({ type: 'error', text: 'Failed to connect to Google Calendar' });
-    } finally {
-      setLoading(false);
-    }
-  };
+  const calendarOk = data.calendar.configured && !data.calendar.error;
 
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-white p-6">
@@ -103,25 +95,35 @@ export default function Admin() {
           </div>
         )}
 
-        {/* Google Calendar */}
+        {/* Google Calendar status */}
         <div className="gradient-border rounded-2xl p-6 mb-6">
           <h2 className="font-playfair text-xl mb-4">Google Calendar</h2>
-          <p className="text-white/60 mb-4">
-            Connect your Google Calendar to automatically sync bookings and manage availability.
+          <p className="text-white/60 mb-4 text-sm">
+            Bookings sync to a Google Calendar via a server-side service account.
+            Set <code className="bg-white/10 px-1 py-0.5 rounded text-xs">GOOGLE_SERVICE_ACCOUNT_JSON</code>{' '}
+            and <code className="bg-white/10 px-1 py-0.5 rounded text-xs">GOOGLE_CALENDAR_ID</code> on
+            the host, and share the calendar with the service account email
+            with "Make changes to events" permission.
           </p>
-          <div className="flex items-center gap-4">
-            <div className={`w-3 h-3 rounded-full ${data.calendarConnected ? 'bg-green-400' : 'bg-yellow-400'}`} />
+          <div className="flex items-center gap-3">
+            <div
+              className={`w-3 h-3 rounded-full ${
+                calendarOk ? 'bg-green-400' : data.calendar.configured ? 'bg-red-400' : 'bg-yellow-400'
+              }`}
+            />
             <span className="text-white/80">
-              {data.calendarConnected ? 'Connected' : 'Not connected'}
+              {calendarOk
+                ? 'Connected'
+                : data.calendar.configured
+                ? 'Configured but not reachable'
+                : 'Not configured'}
             </span>
           </div>
-          <button
-            onClick={connectCalendar}
-            disabled={loading}
-            className="mt-4 px-6 py-3 bg-[#f48fb1] text-[#0a0a0a] font-semibold rounded-xl hover:bg-[#f8bbd9] transition-all disabled:opacity-50"
-          >
-            {loading ? 'Connecting...' : data.calendarConnected ? 'Reconnect Calendar' : 'Connect Google Calendar'}
-          </button>
+          {data.calendar.error && (
+            <p className="mt-3 text-red-300 text-sm">
+              {data.calendar.error}
+            </p>
+          )}
         </div>
 
         {/* Needs manual sync */}
@@ -203,13 +205,13 @@ export default function Admin() {
               <div className="text-sm text-white/50">Manage VALR credentials</div>
             </a>
             <a
-              href="https://console.cloud.google.com/"
+              href="https://console.cloud.google.com/iam-admin/serviceaccounts"
               target="_blank"
               rel="noopener noreferrer"
               className="p-4 bg-white/5 rounded-xl hover:bg-white/10 transition-colors"
             >
-              <div className="font-semibold mb-1">Google Cloud</div>
-              <div className="text-sm text-white/50">Calendar API settings</div>
+              <div className="font-semibold mb-1">Service Accounts</div>
+              <div className="text-sm text-white/50">Manage calendar service account</div>
             </a>
             <a
               href="https://calendar.google.com/"

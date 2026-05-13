@@ -1,7 +1,7 @@
 // Server-only Google Calendar helpers shared across payment routes.
+// Uses the service-account client from google.server.ts — no OAuth tokens.
 
-import { google } from 'googleapis';
-import { getOAuthClient } from './google-tokens.server';
+import { getCalendarClient, getCalendarId } from './google.server';
 import { getReservation, markConfirmed } from './bookings.server';
 
 interface ConfirmResponse {
@@ -37,8 +37,7 @@ export async function confirmReservationOnCalendar(
 
   let eventId: string | null | undefined;
   try {
-    const auth = await getOAuthClient();
-    const calendar = google.calendar({ version: 'v3', auth });
+    const calendar = getCalendarClient();
 
     const event = {
       summary: `🧖‍♀️ ${reservation.service} - ${reservation.customer_name}`,
@@ -71,7 +70,7 @@ export async function confirmReservationOnCalendar(
     };
 
     const created = await calendar.events.insert({
-      calendarId: process.env.GOOGLE_CALENDAR_ID || 'primary',
+      calendarId: getCalendarId(),
       requestBody: event,
     });
     eventId = created.data.id;
@@ -125,14 +124,13 @@ export async function confirmReservationOnCalendar(
 }
 
 /**
- * Fetches Google Calendar event ranges for a given local-date string.
- * Throws if the calendar isn't connected.
+ * Fetches Google Calendar event ranges for a given local-date string,
+ * used by the slot picker. Throws if the calendar isn't reachable.
  */
 export async function fetchGoogleEventsForDate(
   dateStr: string,
 ): Promise<Array<{ start: Date; end: Date }>> {
-  const auth = await getOAuthClient();
-  const calendar = google.calendar({ version: 'v3', auth });
+  const calendar = getCalendarClient();
 
   const date = new Date(dateStr);
   const startOfDay = new Date(date);
@@ -141,7 +139,7 @@ export async function fetchGoogleEventsForDate(
   endOfDay.setHours(23, 59, 59, 999);
 
   const events = await calendar.events.list({
-    calendarId: process.env.GOOGLE_CALENDAR_ID || 'primary',
+    calendarId: getCalendarId(),
     timeMin: startOfDay.toISOString(),
     timeMax: endOfDay.toISOString(),
     singleEvents: true,
