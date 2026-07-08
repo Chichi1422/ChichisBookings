@@ -10,7 +10,7 @@ import {
   reserveSlot,
   type PaymentMethod,
 } from '~/lib/bookings.server';
-import { confirmReservationOnCalendar, fetchGoogleEventsForDate } from '~/lib/calendar.server';
+import { fetchGoogleEventsForDate } from '~/lib/calendar.server';
 
 interface TimeSlot {
   time: string;
@@ -160,7 +160,8 @@ async function handleConfirmCashBooking(formData: FormData): Promise<Response> {
     return Response.json({ error: paid.error }, { status: paid.error === 'reservation_expired' ? 410 : 500 });
   }
 
-  const result = await confirmReservationOnCalendar(reservationId);
-  return Response.json(result.responseBody, { status: result.status });
+  // Do NOT auto-confirm: cash bookings also wait at 'paid' for the owner to
+  // confirm or decline in /admin.
+  return Response.json({ success: true, pendingConfirmation: true });
 }
 

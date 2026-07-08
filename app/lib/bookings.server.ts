@@ -37,10 +37,14 @@ export interface BookingRow {
   payment_method: PaymentMethod;
   payment_provider_ref: string | null;
   amount_zar: number | null;
-  status: 'pending' | 'paid' | 'confirmed' | 'cancelled' | 'expired';
+  status: 'pending' | 'paid' | 'confirmed' | 'cancelled' | 'expired' | 'declined';
   google_event_id: string | null;
   created_at: string;
   expires_at: string;
+  paid_currency: string | null;
+  paid_amount: number | null;
+  refund_ref: string | null;
+  refunded_at: string | null;
 }
 
 export type ReserveResult =
@@ -205,6 +209,42 @@ export async function markConfirmed(
 }
 
 /**
+ * Owner declines a paid booking. Atomic 'paid' → 'declined' so a double-click
+ * can't decline (or trigger a refund) twice — only the first caller gets the
+ * row back. Frees the slot (declined is outside the overlap constraint).
+ */
+export async function markDeclined(reservationId: string): Promise<ConfirmResult> {
+  const { data, error } = await supabaseAdmin
+    .from('bookings')
+    .update({ status: 'declined' })
+    .eq('id', reservationId)
+    .eq('status', 'paid')
+    .select('*')
+    .maybeSingle();
+
+  if (error) {
+    console.error('[bookings] markDeclined failed:', error);
+    return { ok: false, error: 'db_error', detail: error.message };
+  }
+  if (!data) {
+    // Not paid, missing, or already handled by a concurrent decline.
+    return { ok: false, error: 'reservation_missing' };
+  }
+  return { ok: true, booking: data as BookingRow };
+}
+
+/**
+ * Records a completed refund reference against a declined booking.
+ */
+export async function recordRefund(reservationId: string, refundRef: string): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from('bookings')
+    .update({ refund_ref: refundRef, refunded_at: new Date().toISOString() })
+    .eq('id', reservationId);
+  if (error) console.error('[bookings] recordRefund failed:', error);
+}
+
+/**
  * Releases a pending reservation when the user closes the modal or the
  * countdown expires. No-op if the row already moved past pending.
  */
@@ -256,30 +296,30 @@ export async function getLiveBookingRanges(dateStr: string): Promise<Array<{ sta
 }
 
 /**
- * Bookings that took payment but never made it onto the calendar — the
- * admin needs to fix these by hand.
+ * Paid bookings awaiting the owner's confirm/decline decision. No calendar
+ * event exists yet — confirming creates it, declining refunds (PayPal).
  */
-export async function getNeedsManualSync(): Promise<BookingRow[]> {
+export async function getAwaitingDecision(): Promise<BookingRow[]> {
   const { data, error } = await supabaseAdmin
     .from('bookings')
     .select('*')
     .eq('status', 'paid')
     .order('start_at', { ascending: true });
   if (error) {
-    console.error('[bookings] getNeedsManualSync failed:', error);
+    console.error('[bookings] getAwaitingDecision failed:', error);
     return [];
   }
   return (data as BookingRow[]) ?? [];
 }
 
 /**
- * Recently confirmed bookings, for the admin overview.
+ * Confirmed upcoming bookings, for the admin overview.
  */
 export async function getUpcomingBookings(limit = 25): Promise<BookingRow[]> {
   const { data, error } = await supabaseAdmin
     .from('bookings')
     .select('*')
-    .in('status', ['confirmed', 'paid'])
+    .eq('status', 'confirmed')
     .gte('start_at', new Date().toISOString())
     .order('start_at', { ascending: true })
     .limit(limit);

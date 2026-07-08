@@ -354,11 +354,8 @@ export function BookingModal({
     }
   };
 
-  const handlePayPalSuccess = (txId: string, warning?: string) => {
+  const handlePayPalSuccess = (txId: string) => {
     setTransactionId(txId);
-    if (warning === 'payment_received_calendar_pending') {
-      setError('Payment received — calendar sync is pending. We will confirm via WhatsApp shortly.');
-    }
     setStep('confirmed');
   };
 
@@ -406,7 +403,7 @@ export function BookingModal({
             {step === 'details' && 'Complete Your Booking'}
             {step === 'payment' && 'Payment'}
             {step === 'processing' && 'Processing...'}
-            {step === 'confirmed' && 'Booking Confirmed!'}
+            {step === 'confirmed' && 'Booking Requested'}
           </h3>
           <button
             onClick={onClose}
@@ -659,7 +656,7 @@ export function BookingModal({
                         setError('Payment capture failed. Please try again.');
                         return;
                       }
-                      handlePayPalSuccess(result.transactionId, result.warning);
+                      handlePayPalSuccess(result.transactionId);
                     }}
                     onError={(err) => {
                       console.error('PayPal error:', err);
@@ -720,11 +717,11 @@ export function BookingModal({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
               </svg>
             </div>
-            <h3 className="font-playfair text-2xl mb-2">Booking Confirmed!</h3>
+            <h3 className="font-playfair text-2xl mb-2">Booking Requested</h3>
             <p className="text-white/60 mb-4">
               {paymentMethod === 'cash'
-                ? "We'll see you soon! Please remember to bring cash."
-                : "Thank you for your payment. We'll see you soon!"}
+                ? "Thanks! Your booking is pending confirmation — we'll confirm via WhatsApp shortly. Please remember to bring cash."
+                : "Payment received. Your booking is pending confirmation — we'll confirm via WhatsApp shortly. If we can't accommodate your time, you'll be fully refunded."}
             </p>
             <div className="bg-white/5 rounded-xl p-4 text-left mb-6">
               <p className="text-sm">
