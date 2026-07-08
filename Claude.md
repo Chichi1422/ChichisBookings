@@ -38,6 +38,7 @@ React Router v7 full-stack web app for **Chi Chi's Beauty Spa** — a Fish Hoek,
 | `supabase/migrations/0001_init.sql` | Schema — `oauth_tokens`, `bookings` (with EXCLUDE constraint) |
 | `supabase/migrations/0002_cron_expire.sql` | `pg_cron` job that expires stale pending bookings |
 | `supabase/migrations/0004_pricing.sql` | Catalog tables (`service_groups`/`service_options`), `pricing_config`, `fx_rates` |
+| `supabase/migrations/0005_confirm_decline.sql` | Adds `declined` status + refund columns for the owner confirm/decline gate |
 
 ## Architecture Notes
 - Routes defined in `app/routes.ts` — both pages and API endpoints.
@@ -46,7 +47,8 @@ React Router v7 full-stack web app for **Chi Chi's Beauty Spa** — a Fish Hoek,
 - **Google Calendar:** server-side **service account** (`GOOGLE_SERVICE_ACCOUNT_JSON`). The spa shares one calendar (`GOOGLE_CALENDAR_ID`) with the service account email and grants "Make changes to events". No OAuth, no refresh tokens, no per-owner consent flow.
 - **Owner-only admin** via Supabase magic link. `OWNER_EMAIL` is the only address that can sign in. `assertOwner(request)` gates `/admin` and any future admin-only endpoints.
 - **Booking concurrency:** Postgres `EXCLUDE USING gist` on `tstzrange(start_at, end_at)` enforces no double-booking atomically. Slot is reserved (`status='pending'`, TTL 10 min for PayPal/VALR, until 24h-before-appointment for cash) **before** the payment screen opens. A `BEFORE INSERT` trigger expires overlapping stale-pending rows just-in-time so a lapsed TTL never blocks the next booking; a 5-minute `pg_cron` job sweeps the rest. PayPal `custom_id` carries `reservationId`; capture re-validates and refunds on expiry.
-- **Calendar failure path:** if `events.insert` fails after payment captures, the booking row stays at `status='paid'` and surfaces in the admin's "needs manual sync" list. The customer is told payment was received and confirmation will follow — never silently lied to.
+- **Owner confirm/decline gate:** payment does **not** auto-confirm. A captured booking sits at `status='paid'` and appears in the admin's "Pending confirmation" list. The owner **confirms** (→ `confirmReservationOnCalendar` creates the calendar event → `status='confirmed'`) or **declines** (`markDeclined` flips `paid`→`declined` atomically, then PayPal captures are refunded via `refundCapture`; cash needs no refund, VALR is refunded manually). `declined` is outside the overlap constraint, so declining frees the slot. Customers are told payment was received and the booking is *pending confirmation* — never told it's confirmed prematurely. No automated customer notification exists yet; the owner messages via WhatsApp.
+- **Calendar failure path:** if `events.insert` fails during confirmation, `markConfirmed` isn't reached, the row stays at `status='paid'`, and it remains in "Pending confirmation" for the owner to retry. The customer is never told a booking is on the calendar when it isn't.
 - **Pricing:** ZAR is the base/source-of-truth price, stored in `app.service_groups`/`app.service_options` and managed from `/admin/pricing`. PayPal cannot process ZAR, so card payments are charged in USD/EUR, converted at checkout by `app/lib/fx.server.ts` (live cached rate + owner-set markup %). ZAR-native payment is cash/VALR only.
 - VALR integration uses HMAC-SHA512 signed requests.
 - The old inline booking modal in `spa.tsx` is commented out; the `BookingModal` component is used.

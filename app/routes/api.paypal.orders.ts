@@ -3,35 +3,12 @@
 // client-supplied prices.
 
 import { getReservation, markPaid } from '~/lib/bookings.server';
-import { confirmReservationOnCalendar } from '~/lib/calendar.server';
 import { quoteAmount, type QuoteCurrency } from '~/lib/fx.server';
-
-const PAYPAL_API_BASE =
-  process.env.PAYPAL_MODE === 'live'
-    ? 'https://api-m.paypal.com'
-    : 'https://api-m.sandbox.paypal.com';
+import { PAYPAL_API_BASE, getPayPalAccessToken, refundCapture } from '~/lib/paypal.server';
 
 // Currencies PayPal can process for this account. ZAR is intentionally absent —
 // PayPal does not support it, so ZAR bookings go through cash/VALR instead.
 const SUPPORTED_PAYPAL_CURRENCIES: QuoteCurrency[] = ['USD', 'EUR'];
-
-async function getPayPalAccessToken(): Promise<string> {
-  const auth = Buffer.from(
-    `${process.env.PAYPAL_CLIENT_ID}:${process.env.PAYPAL_CLIENT_SECRET}`,
-  ).toString('base64');
-
-  const response = await fetch(`${PAYPAL_API_BASE}/v1/oauth2/token`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${auth}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'grant_type=client_credentials',
-  });
-
-  const data = await response.json();
-  return data.access_token;
-}
 
 export async function action({ request }: { request: Request }) {
   const formData = await request.formData();
@@ -163,44 +140,24 @@ async function captureOrder(formData: FormData) {
     const paid = await markPaid(reservationId, captureId, paidRecord);
     if (!paid.ok) {
       // Reservation expired / already used. Refund and tell the user.
-      await refundCapture(captureId, accessToken).catch((err) =>
-        console.error('PayPal refund after expired reservation failed:', err),
-      );
+      const refund = await refundCapture(captureId);
+      if (!refund.ok) console.error('PayPal refund after expired reservation failed:', refund.error);
       return Response.json(
-        { error: 'reservation_expired', refunded: true },
+        { error: 'reservation_expired', refunded: refund.ok },
         { status: 410 },
       );
     }
 
-    const confirmation = await confirmReservationOnCalendar(reservationId);
-    return Response.json(
-      {
-        ...confirmation.responseBody,
-        transactionId: captureId,
-        status: data.status,
-      },
-      { status: confirmation.status },
-    );
+    // Do NOT auto-confirm: the booking now waits at status='paid' for the owner
+    // to confirm (creates the calendar event) or decline (refunds) in /admin.
+    return Response.json({
+      success: true,
+      pendingConfirmation: true,
+      transactionId: captureId,
+      status: data.status,
+    });
   } catch (error) {
     console.error('PayPal capture error:', error);
     return Response.json({ error: 'Internal server error' }, { status: 500 });
-  }
-}
-
-async function refundCapture(captureId: string, accessToken: string): Promise<void> {
-  const response = await fetch(
-    `${PAYPAL_API_BASE}/v2/payments/captures/${captureId}/refund`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: '{}', // empty body = full refund
-    },
-  );
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`PayPal refund failed: ${response.status} ${body}`);
   }
 }

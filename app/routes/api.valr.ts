@@ -4,7 +4,6 @@
 
 import crypto from 'crypto';
 import { getReservation, markPaid } from '~/lib/bookings.server';
-import { confirmReservationOnCalendar } from '~/lib/calendar.server';
 
 const VALR_API_BASE = 'https://api.valr.com';
 
@@ -174,7 +173,10 @@ async function checkPayment(formData: FormData): Promise<Response> {
       });
     }
 
-    const paid = await markPaid(reservationId, matching.id);
+    const paid = await markPaid(reservationId, matching.id, {
+      currency: matching.currency || 'ZAR',
+      amount: Number(matching.creditValue) || expectedAmount,
+    });
     if (!paid.ok) {
       return Response.json(
         { error: paid.error, found: true },
@@ -182,21 +184,20 @@ async function checkPayment(formData: FormData): Promise<Response> {
       );
     }
 
-    const confirmation = await confirmReservationOnCalendar(reservationId);
-    return Response.json(
-      {
-        ...confirmation.responseBody,
-        found: true,
-        payment: {
-          id: matching.id,
-          amount: matching.creditValue,
-          currency: matching.currency,
-          timestamp: matching.eventAt,
-          status: 'confirmed',
-        },
+    // Do NOT auto-confirm: the booking waits at 'paid' for the owner to confirm
+    // or decline in /admin.
+    return Response.json({
+      success: true,
+      found: true,
+      pendingConfirmation: true,
+      payment: {
+        id: matching.id,
+        amount: matching.creditValue,
+        currency: matching.currency,
+        timestamp: matching.eventAt,
+        status: 'paid',
       },
-      { status: confirmation.status },
-    );
+    });
   } catch (error) {
     console.error('VALR check payment error:', error);
     return Response.json({ error: 'Failed to check payment status', found: false }, { status: 500 });

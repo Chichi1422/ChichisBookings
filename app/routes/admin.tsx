@@ -2,13 +2,18 @@
 // Owner-only admin panel. Loader gates with assertOwner.
 
 import { useState } from 'react';
-import { Form, Link, useLoaderData, useSearchParams } from 'react-router';
-import type { LoaderFunctionArgs } from 'react-router';
+import { Form, Link, useLoaderData, useSearchParams, redirect } from 'react-router';
+import type { ActionFunctionArgs, LoaderFunctionArgs } from 'react-router';
 import { assertOwner } from '~/lib/auth.server';
 import { isCalendarConfigured, verifyCalendarAccess } from '~/lib/google.server';
+import { confirmReservationOnCalendar } from '~/lib/calendar.server';
+import { refundCapture } from '~/lib/paypal.server';
 import {
-  getNeedsManualSync,
+  getAwaitingDecision,
   getUpcomingBookings,
+  getReservation,
+  markDeclined,
+  recordRefund,
   type BookingRow,
 } from '~/lib/bookings.server';
 
@@ -24,7 +29,7 @@ interface CalendarStatus {
 interface LoaderData {
   ownerEmail: string;
   calendar: CalendarStatus;
-  needsManualSync: BookingRow[];
+  awaitingDecision: BookingRow[];
   upcoming: BookingRow[];
 }
 
@@ -32,9 +37,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const session = await assertOwner(request);
 
   const configured = isCalendarConfigured();
-  const [calendarError, needsManualSync, upcoming] = await Promise.all([
+  const [calendarError, awaitingDecision, upcoming] = await Promise.all([
     configured ? verifyCalendarAccess() : Promise.resolve('not_configured'),
-    getNeedsManualSync(),
+    getAwaitingDecision(),
     getUpcomingBookings(25),
   ]);
 
@@ -45,7 +50,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         configured,
         error: calendarError === 'not_configured' ? null : calendarError,
       },
-      needsManualSync,
+      awaitingDecision,
       upcoming,
     } satisfies LoaderData),
     {
@@ -54,12 +59,68 @@ export async function loader({ request }: LoaderFunctionArgs) {
   );
 }
 
+export async function action({ request }: ActionFunctionArgs) {
+  const session = await assertOwner(request);
+  const fd = await request.formData();
+  const intent = fd.get('intent') as string;
+  const reservationId = ((fd.get('reservationId') as string) || '').trim();
+
+  const back = (params: string) =>
+    redirect(`/admin?${params}`, { headers: session.headers });
+
+  if (!reservationId) return back('error=missing_reservation');
+
+  if (intent === 'confirmBooking') {
+    const result = await confirmReservationOnCalendar(reservationId);
+    const body = result.responseBody;
+    if (body?.success && !body?.warning) return back('ok=confirmed');
+    if (body?.warning === 'payment_received_calendar_pending') return back('error=calendar_unreachable');
+    return back(`error=${encodeURIComponent(body?.error || body?.warning || 'confirm_failed')}`);
+  }
+
+  if (intent === 'declineBooking') {
+    const reservation = await getReservation(reservationId);
+    if (!reservation) return back('error=reservation_missing');
+
+    // Atomic paid → declined first, so a double-click can't double-refund.
+    const declined = await markDeclined(reservationId);
+    if (!declined.ok) return back('error=not_paid_or_already_handled');
+
+    // Refund PayPal captures. Cash has nothing to refund; VALR (crypto) must be
+    // refunded manually.
+    const ref = reservation.payment_provider_ref;
+    if (reservation.payment_method === 'paypal' && ref && ref !== 'CASH-PENDING') {
+      const refund = await refundCapture(ref);
+      if (!refund.ok) return back('error=declined_but_refund_failed');
+      if (refund.refundId) await recordRefund(reservationId, refund.refundId);
+      return back('ok=declined_refunded');
+    }
+    return back('ok=declined');
+  }
+
+  return back('error=unknown_intent');
+}
+
 export default function Admin() {
   const data = useLoaderData<typeof loader>() as LoaderData;
   const [searchParams] = useSearchParams();
   const [message] = useState<{ type: 'success' | 'error'; text: string } | null>(() => {
+    const ok = searchParams.get('ok');
     const error = searchParams.get('error');
-    if (error) return { type: 'error', text: `Error: ${error}` };
+    const okText: Record<string, string> = {
+      confirmed: 'Booking confirmed and added to the calendar.',
+      declined: 'Booking declined.',
+      declined_refunded: 'Booking declined and the PayPal payment was refunded.',
+    };
+    const errText: Record<string, string> = {
+      calendar_unreachable: 'Payment stands, but the calendar could not be reached — try confirming again.',
+      declined_but_refund_failed:
+        'Booking declined, but the refund failed. Refund manually in the PayPal dashboard.',
+      not_paid_or_already_handled: 'That booking was already handled.',
+      reservation_missing: 'Booking not found.',
+    };
+    if (ok) return { type: 'success', text: okText[ok] ?? 'Done.' };
+    if (error) return { type: 'error', text: errText[error] ?? `Error: ${error}` };
     return null;
   });
 
@@ -129,33 +190,72 @@ export default function Admin() {
           )}
         </div>
 
-        {/* Needs manual sync */}
+        {/* Pending confirmation */}
         <div className="gradient-border rounded-2xl p-6 mb-6">
-          <h2 className="font-playfair text-xl mb-2">Needs manual calendar sync</h2>
+          <h2 className="font-playfair text-xl mb-2">Pending confirmation</h2>
           <p className="text-white/60 text-sm mb-4">
-            Bookings where payment was received but the calendar event could not be created.
+            Paid bookings awaiting your decision. Confirm to add it to the calendar, or
+            decline to reject it (PayPal payments are refunded automatically).
           </p>
-          {data.needsManualSync.length === 0 ? (
-            <p className="text-white/40 text-sm">Nothing to sync — all paid bookings are on the calendar.</p>
+          {data.awaitingDecision.length === 0 ? (
+            <p className="text-white/40 text-sm">Nothing waiting — you're all caught up.</p>
           ) : (
             <ul className="divide-y divide-white/10">
-              {data.needsManualSync.map((b) => (
-                <li key={b.id} className="py-3 text-sm">
-                  <div className="flex justify-between items-start gap-4">
-                    <div>
-                      <div className="font-medium">{b.service} — {b.duration}</div>
-                      <div className="text-white/60">
-                        {b.customer_name} · {b.customer_phone} · {b.is_home_call ? 'Home' : 'Spa'}
+              {data.awaitingDecision.map((b) => {
+                const paid =
+                  b.paid_currency && b.paid_amount != null
+                    ? `${b.paid_currency} ${Number(b.paid_amount).toFixed(2)}`
+                    : b.payment_method === 'cash'
+                    ? 'Cash on arrival'
+                    : '—';
+                return (
+                  <li key={b.id} className="py-4 text-sm">
+                    <div className="flex justify-between items-start gap-4 mb-3">
+                      <div>
+                        <div className="font-medium">{b.service} — {b.duration}</div>
+                        <div className="text-white/60">
+                          {b.customer_name} · {b.customer_phone} · {b.is_home_call ? 'Home' : 'Spa'}
+                        </div>
+                        <div className="text-white/40 text-xs mt-1">
+                          {b.booking_date} {b.booking_time} · {b.payment_method.toUpperCase()}
+                          {b.payment_provider_ref && b.payment_provider_ref !== 'CASH-PENDING'
+                            ? ` · ${b.payment_provider_ref}`
+                            : ''}
+                        </div>
                       </div>
-                      <div className="text-white/40 text-xs mt-1">
-                        {b.booking_date} {b.booking_time} · {b.payment_method.toUpperCase()}
-                        {b.payment_provider_ref ? ` · ${b.payment_provider_ref}` : ''}
+                      <div className="text-right">
+                        <div className="text-[#f48fb1] font-semibold">R{b.amount_zar ?? '—'}</div>
+                        <div className="text-white/40 text-xs">paid {paid}</div>
                       </div>
                     </div>
-                    <div className="text-[#f48fb1] font-semibold">R{b.amount_zar ?? '—'}</div>
-                  </div>
-                </li>
-              ))}
+                    <div className="flex gap-3">
+                      <Form method="post">
+                        <input type="hidden" name="intent" value="confirmBooking" />
+                        <input type="hidden" name="reservationId" value={b.id} />
+                        <button className="px-4 py-2 bg-green-500/90 text-[#0a0a0a] text-sm font-semibold rounded-lg hover:bg-green-400 transition-all">
+                          Confirm
+                        </button>
+                      </Form>
+                      <Form
+                        method="post"
+                        onSubmit={(e) => {
+                          const msg =
+                            b.payment_method === 'paypal'
+                              ? `Decline this booking and refund the ${paid} PayPal payment?`
+                              : 'Decline this booking?';
+                          if (!confirm(msg)) e.preventDefault();
+                        }}
+                      >
+                        <input type="hidden" name="intent" value="declineBooking" />
+                        <input type="hidden" name="reservationId" value={b.id} />
+                        <button className="px-4 py-2 border border-red-500/40 text-red-300 text-sm rounded-lg hover:bg-red-500/10 transition-all">
+                          Decline{b.payment_method === 'paypal' ? ' & refund' : ''}
+                        </button>
+                      </Form>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
