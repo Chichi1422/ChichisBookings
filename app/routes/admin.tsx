@@ -72,6 +72,9 @@ export default function Admin() {
           <h1 className="font-playfair text-3xl">Admin Panel</h1>
           <div className="flex items-center gap-4 text-sm">
             <span className="text-white/50">{data.ownerEmail}</span>
+            <Link to="/admin/pricing" className="text-[#f48fb1] hover:text-[#f8bbd9] transition-colors">
+              Pricing & Services
+            </Link>
             <Form method="post" action="/admin/logout">
               <button className="text-[#f48fb1] hover:text-[#f8bbd9] transition-colors">
                 Sign out

@@ -1,5 +1,6 @@
 import type { Route } from "./+types/home";
 import { ChiChisSpa } from "~/components/spa";
+import { getServiceCatalog, getPricingConfig } from "~/lib/services.server";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -9,6 +10,25 @@ export function meta({}: Route.MetaArgs) {
   ];
 }
 
-export default function Home() {
-  return <ChiChisSpa />;
+export async function loader() {
+  const [catalog, config] = await Promise.all([
+    getServiceCatalog(),
+    getPricingConfig(),
+  ]);
+
+  // Map the DB catalog into the client's Service shape (price in ZAR).
+  const services = catalog.map((g) => ({
+    name: g.name,
+    description: g.description,
+    icon: g.icon,
+    options: g.options.map((o) => ({ duration: o.duration, price: o.priceZar })),
+  }));
+
+  return { services, homeCallFee: config.homeCallFeeZar };
+}
+
+export default function Home({ loaderData }: Route.ComponentProps) {
+  return (
+    <ChiChisSpa services={loaderData.services} homeCallFee={loaderData.homeCallFee} />
+  );
 }
