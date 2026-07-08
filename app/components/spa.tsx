@@ -12,73 +12,6 @@ interface Service {
   options: ServiceOption[];
 }
 
-const services: Service[] = [
-  {
-    name: "Swedish Massage / Aroma Therapy",
-    description: "Gentle, flowing strokes to ease tension and promote deep relaxation",
-    icon: "✿",
-    options: [
-      { duration: "30 min", price: 400 },
-      { duration: "60 min", price: 600 },
-      { duration: "90 min", price: 800 },
-    ]
-  },
-  {
-    name: "Deep Tissue / Sports Massage",
-    description: "Intensive pressure targeting muscle knots and chronic tension",
-    icon: "❋",
-    options: [
-      { duration: "30 min", price: 500 },
-      { duration: "60 min", price: 700 },
-      { duration: "90 min", price: 900 },
-    ]
-  },
-  {
-    name: "Hot Stone Therapy",
-    description: "Heated volcanic stones melt away stress and restore balance",
-    icon: "◈",
-    options: [
-      { duration: "30 min", price: 400 },
-      { duration: "60 min", price: 750 },
-      { duration: "90 min", price: 950 },
-    ]
-  },
-  {
-    name: "Reflexology",
-    description: "Pressure point therapy on feet to restore energy flow",
-    icon: "✧",
-    options: [
-      { duration: "30 min", price: 350 },
-    ]
-  },
-  {
-    name: "Neck Shoulder and Back",
-    description: "Targting shoulders and back to relieve stress and tension",
-    icon: "❋",
-    options: [
-      { duration: "30 min", price: 300 },
-      { duration: "60 min", price: 450 },
-    ]
-  },
-  {
-    name: "Pedicure without Gel Polish",
-    description: "Classic pedicure treatment for beautiful, pampered feet",
-    icon: "❀",
-    options: [
-      { duration: "30 min", price: 300 },
-    ]
-  },
-  {
-    name: "Pedicure with Gel Polish",
-    description: "Luxury pedicure with long-lasting gel polish finish",
-    icon: "❀",
-    options: [
-      { duration: "30 min", price: 400 },
-    ]
-  },
-  
-];
-
 const galleryImages = [
   "https://images.unsplash.com/photo-1600334129128-685c5582fd35?w=400&h=300&fit=crop",
   "https://images.unsplash.com/photo-1544161515-4ab6ce6db874?w=400&h=300&fit=crop",
@@ -90,7 +23,12 @@ const timeSlots = [
   '09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00', '18:00'
 ];
 
-export function ChiChisSpa() {
+interface ChiChisSpaProps {
+  services: Service[];
+  homeCallFee: number;
+}
+
+export function ChiChisSpa({ services, homeCallFee }: ChiChisSpaProps) {
   const [selectedService, setSelectedService] = useState<Service | null>(null);
   const [selectedOption, setSelectedOption] = useState<ServiceOption | null>(null);
   const [isHomeCall, setIsHomeCall] = useState(false);
@@ -108,9 +46,8 @@ export function ChiChisSpa() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  const homeCallFee = 150;
-  const totalPrice = selectedOption 
-    ? selectedOption.price + (isHomeCall ? homeCallFee : 0) 
+  const totalPrice = selectedOption
+    ? selectedOption.price + (isHomeCall ? homeCallFee : 0)
     : 0;
 
   const handleBooking = () => {

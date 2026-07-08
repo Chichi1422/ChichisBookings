@@ -68,6 +68,10 @@ export function BookingModal({
   const [reservation, setReservation] = useState<Reservation | null>(null);
   const [reserving, setReserving] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState<number>(0);
+  // PayPal can't process ZAR, so card payments are charged in USD or EUR,
+  // converted server-side from the ZAR base price.
+  const [payCurrency, setPayCurrency] = useState<'USD' | 'EUR'>('USD');
+  const [quote, setQuote] = useState<{ currency: string; amount: number } | null>(null);
 
   const totalPrice = selectedOption
     ? selectedOption.price + (isHomeCall ? homeCallFee : 0)
@@ -95,6 +99,8 @@ export function BookingModal({
       setError(null);
       setReservation(null);
       setSecondsLeft(0);
+      setPayCurrency('USD');
+      setQuote(null);
     }
   }, [isOpen]);
 
@@ -363,6 +369,29 @@ export function BookingModal({
     }
   }, [step, paymentMethod, reservation]);
 
+  // Fetch the live converted amount whenever the PayPal currency changes.
+  useEffect(() => {
+    if (step !== 'payment' || paymentMethod !== 'paypal' || !reservation) {
+      setQuote(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(
+          `/api/fx?reservationId=${encodeURIComponent(reservation.reservationId)}&currency=${payCurrency}`,
+        );
+        const data = await res.json();
+        if (!cancelled && res.ok) setQuote({ currency: data.currency, amount: data.amount });
+      } catch {
+        if (!cancelled) setQuote(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [step, paymentMethod, reservation, payCurrency]);
+
   if (!isOpen || !selectedService || !selectedOption) return null;
 
   const minutesLeft = Math.floor(secondsLeft / 60);
@@ -554,21 +583,47 @@ export function BookingModal({
             {/* PayPal Payment */}
             {paymentMethod === 'paypal' && reservation && (
               <PayPalScriptProvider
+                key={payCurrency}
                 options={{
                   clientId: import.meta.env.VITE_PAYPAL_CLIENT_ID || 'test',
-                  currency: 'USD',
+                  currency: payCurrency,
                 }}
               >
                 <div className="bg-white/5 rounded-xl p-4">
+                  {/* Currency selector — PayPal cannot process ZAR, so card
+                      payments settle in USD or EUR. */}
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-sm text-white/60">Pay in</span>
+                    <div className="flex gap-2">
+                      {(['USD', 'EUR'] as const).map((c) => (
+                        <button
+                          key={c}
+                          type="button"
+                          onClick={() => setPayCurrency(c)}
+                          className={`px-3 py-1.5 rounded-lg border text-sm transition-all ${
+                            payCurrency === c
+                              ? 'border-[#f48fb1] bg-[#f48fb1]/10 text-[#f48fb1]'
+                              : 'border-white/10 text-white/60 hover:border-white/30'
+                          }`}
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                   <p className="text-sm text-white/60 mb-4">
-                    Pay securely with PayPal or credit/debit card
+                    {quote
+                      ? `You'll pay ≈ ${quote.currency} ${quote.amount.toFixed(2)} (R${reservation.amountZar})`
+                      : `Converting R${reservation.amountZar}…`}
                   </p>
                   <PayPalButtons
+                    forceReRender={[payCurrency, quote?.amount]}
                     style={{ layout: 'vertical', color: 'gold', shape: 'rect' }}
                     createOrder={async () => {
                       const formData = new FormData();
                       formData.append('intent', 'create');
                       formData.append('reservationId', reservation.reservationId);
+                      formData.append('currency', payCurrency);
 
                       const response = await fetch('/api/paypal/orders', {
                         method: 'POST',

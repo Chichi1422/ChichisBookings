@@ -4,15 +4,16 @@
 
 import { getReservation, markPaid } from '~/lib/bookings.server';
 import { confirmReservationOnCalendar } from '~/lib/calendar.server';
+import { quoteAmount, type QuoteCurrency } from '~/lib/fx.server';
 
 const PAYPAL_API_BASE =
   process.env.PAYPAL_MODE === 'live'
     ? 'https://api-m.paypal.com'
     : 'https://api-m.sandbox.paypal.com';
 
-// ZAR → USD conversion. Hardcoded for now; tracked as a TODO in
-// References.md to swap for a live FX feed.
-const ZAR_TO_USD_RATE = 0.053;
+// Currencies PayPal can process for this account. ZAR is intentionally absent —
+// PayPal does not support it, so ZAR bookings go through cash/VALR instead.
+const SUPPORTED_PAYPAL_CURRENCIES: QuoteCurrency[] = ['USD', 'EUR'];
 
 async function getPayPalAccessToken(): Promise<string> {
   const auth = Buffer.from(
@@ -65,14 +66,22 @@ async function createOrder(formData: FormData) {
       return Response.json({ error: 'missing_amount' }, { status: 500 });
     }
 
+    const currency = ((formData.get('currency') as string) || 'USD').toUpperCase() as QuoteCurrency;
+    if (!SUPPORTED_PAYPAL_CURRENCIES.includes(currency)) {
+      return Response.json({ error: 'unsupported_currency' }, { status: 400 });
+    }
+
     const accessToken = await getPayPalAccessToken();
-    const usdAmount = (Number(reservation.amount_zar) * ZAR_TO_USD_RATE).toFixed(2);
+    // Server-side conversion from the authoritative ZAR price — never trust a
+    // client-supplied amount, only the currency choice.
+    const quote = await quoteAmount(Number(reservation.amount_zar), currency);
+    const chargeAmount = quote.amount.toFixed(2);
 
     const order = {
       intent: 'CAPTURE',
       purchase_units: [
         {
-          amount: { currency_code: 'USD', value: usdAmount },
+          amount: { currency_code: currency, value: chargeAmount },
           description: `Chi Chi's Spa - ${reservation.service} (${reservation.duration})`,
           // custom_id is the only ground-truth payload we trust on capture.
           custom_id: reservationId,
@@ -142,8 +151,16 @@ async function captureOrder(formData: FormData) {
       return Response.json({ error: 'Capture missing reservation reference' }, { status: 500 });
     }
 
+    // What PayPal actually captured, for the booking record.
+    const paidCurrency: string | undefined = capture?.amount?.currency_code;
+    const paidValue = capture?.amount?.value;
+    const paidRecord =
+      paidCurrency && paidValue != null
+        ? { currency: paidCurrency, amount: Number(paidValue) }
+        : undefined;
+
     // Atomic: only succeeds if still pending + unexpired.
-    const paid = await markPaid(reservationId, captureId);
+    const paid = await markPaid(reservationId, captureId, paidRecord);
     if (!paid.ok) {
       // Reservation expired / already used. Refund and tell the user.
       await refundCapture(captureId, accessToken).catch((err) =>

@@ -4,7 +4,7 @@
 // for slot availability. If two reservations race, exactly one wins.
 
 import { supabaseAdmin } from './supabase.server';
-import { lookupService, totalPrice, type ServicePrice } from './services.server';
+import { lookupService, totalPrice, getPricingConfig } from './services.server';
 
 const TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Africa/Johannesburg';
 const PAID_RESERVATION_TTL_MIN = 10;
@@ -86,7 +86,7 @@ function expiresAtFor(method: PaymentMethod, start_at: string): string {
  * existing live booking (the EXCLUDE constraint enforces this).
  */
 export async function reserveSlot(input: ReserveSlotInput): Promise<ReserveResult> {
-  const svc = lookupService(input.service, input.duration);
+  const svc = await lookupService(input.service, input.duration);
   if (!svc) {
     return { ok: false, error: 'invalid_service', detail: `${input.service} / ${input.duration}` };
   }
@@ -103,7 +103,8 @@ export async function reserveSlot(input: ReserveSlotInput): Promise<ReserveResul
     return { ok: false, error: 'invalid_time', detail: 'slot in the past' };
   }
 
-  const amount = totalPrice(svc, input.isHomeCall);
+  const { homeCallFeeZar } = await getPricingConfig();
+  const amount = totalPrice(svc.priceZar, input.isHomeCall, homeCallFeeZar);
   const expires_at = expiresAtFor(input.paymentMethod, timing.start_at);
 
   const { data, error } = await supabaseAdmin
@@ -147,10 +148,20 @@ export async function reserveSlot(input: ReserveSlotInput): Promise<ReserveResul
 export async function markPaid(
   reservationId: string,
   paymentProviderRef: string,
+  paid?: { currency: string; amount: number },
 ): Promise<ConfirmResult> {
+  const update: Record<string, unknown> = {
+    status: 'paid',
+    payment_provider_ref: paymentProviderRef,
+  };
+  if (paid) {
+    update.paid_currency = paid.currency;
+    update.paid_amount = paid.amount;
+  }
+
   const { data, error } = await supabaseAdmin
     .from('bookings')
-    .update({ status: 'paid', payment_provider_ref: paymentProviderRef })
+    .update(update)
     .eq('id', reservationId)
     .eq('status', 'pending')
     .gt('expires_at', new Date().toISOString())
