@@ -14,8 +14,12 @@ import {
   getReservation,
   markDeclined,
   recordRefund,
+  rescheduleBooking,
   type BookingRow,
 } from '~/lib/bookings.server';
+import { whatsappLink, confirmedMessage, declinedMessage, rescheduledMessage } from '~/lib/whatsapp';
+
+const SLOT_TIMES = ['09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
 
 export function meta() {
   return [{ title: "Admin | Chi Chi's Beauty Spa" }];
@@ -31,6 +35,9 @@ interface LoaderData {
   calendar: CalendarStatus;
   awaitingDecision: BookingRow[];
   upcoming: BookingRow[];
+  // The booking just confirmed/declined/rescheduled, so the UI can offer a
+  // pre-filled WhatsApp message to the customer.
+  justActioned: { booking: BookingRow; kind: 'confirmed' | 'declined' | 'rescheduled' } | null;
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -43,6 +50,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
     getUpcomingBookings(25),
   ]);
 
+  const url = new URL(request.url);
+  const sent = url.searchParams.get('sent');
+  let justActioned: LoaderData['justActioned'] = null;
+  if (sent) {
+    const booking = await getReservation(sent);
+    if (booking) {
+      const ok = url.searchParams.get('ok');
+      const kind = ok === 'confirmed' ? 'confirmed' : ok === 'rescheduled' ? 'rescheduled' : 'declined';
+      justActioned = { booking, kind };
+    }
+  }
+
   return new Response(
     JSON.stringify({
       ownerEmail: session.email,
@@ -52,6 +71,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       },
       awaitingDecision,
       upcoming,
+      justActioned,
     } satisfies LoaderData),
     {
       headers: { ...Object.fromEntries(session.headers), 'Content-Type': 'application/json' },
@@ -73,7 +93,7 @@ export async function action({ request }: ActionFunctionArgs) {
   if (intent === 'confirmBooking') {
     const result = await confirmReservationOnCalendar(reservationId);
     const body = result.responseBody;
-    if (body?.success && !body?.warning) return back('ok=confirmed');
+    if (body?.success && !body?.warning) return back(`ok=confirmed&sent=${reservationId}`);
     if (body?.warning === 'payment_received_calendar_pending') return back('error=calendar_unreachable');
     return back(`error=${encodeURIComponent(body?.error || body?.warning || 'confirm_failed')}`);
   }
@@ -93,9 +113,19 @@ export async function action({ request }: ActionFunctionArgs) {
       const refund = await refundCapture(ref);
       if (!refund.ok) return back('error=declined_but_refund_failed');
       if (refund.refundId) await recordRefund(reservationId, refund.refundId);
-      return back('ok=declined_refunded');
+      return back(`ok=declined_refunded&sent=${reservationId}`);
     }
-    return back('ok=declined');
+    return back(`ok=declined&sent=${reservationId}`);
+  }
+
+  if (intent === 'rescheduleBooking') {
+    const bookingDate = ((fd.get('bookingDate') as string) || '').trim();
+    const bookingTime = ((fd.get('bookingTime') as string) || '').trim();
+    if (!bookingDate || !bookingTime) return back('error=missing_datetime');
+
+    const result = await rescheduleBooking(reservationId, bookingDate, bookingTime);
+    if (result.ok) return back(`ok=rescheduled&sent=${reservationId}`);
+    return back(`error=${result.error}`);
   }
 
   return back('error=unknown_intent');
@@ -111,6 +141,7 @@ export default function Admin() {
       confirmed: 'Booking confirmed and added to the calendar.',
       declined: 'Booking declined.',
       declined_refunded: 'Booking declined and the PayPal payment was refunded.',
+      rescheduled: 'Booking moved to the new time — still pending your confirmation.',
     };
     const errText: Record<string, string> = {
       calendar_unreachable: 'Payment stands, but the calendar could not be reached — try confirming again.',
@@ -118,6 +149,9 @@ export default function Admin() {
         'Booking declined, but the refund failed. Refund manually in the PayPal dashboard.',
       not_paid_or_already_handled: 'That booking was already handled.',
       reservation_missing: 'Booking not found.',
+      slot_taken: 'That new time overlaps another booking — pick a different slot.',
+      invalid_time: 'That date/time is invalid or in the past.',
+      missing_datetime: 'Pick both a date and a time to reschedule.',
     };
     if (ok) return { type: 'success', text: okText[ok] ?? 'Done.' };
     if (error) return { type: 'error', text: errText[error] ?? `Error: ${error}` };
@@ -156,6 +190,38 @@ export default function Admin() {
             }`}
           >
             {message.text}
+          </div>
+        )}
+
+        {data.justActioned && (
+          <div className="mb-6 p-4 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between gap-4">
+            <div className="text-sm">
+              <div className="font-medium">Let {data.justActioned.booking.customer_name} know</div>
+              <div className="text-white/50">
+                Opens WhatsApp with a pre-written{' '}
+                {data.justActioned.kind === 'confirmed'
+                  ? 'confirmation'
+                  : data.justActioned.kind === 'rescheduled'
+                  ? 'reschedule'
+                  : 'decline'}{' '}
+                message.
+              </div>
+            </div>
+            <a
+              href={whatsappLink(
+                data.justActioned.booking.customer_phone,
+                data.justActioned.kind === 'confirmed'
+                  ? confirmedMessage(data.justActioned.booking)
+                  : data.justActioned.kind === 'rescheduled'
+                  ? rescheduledMessage(data.justActioned.booking)
+                  : declinedMessage(data.justActioned.booking),
+              )}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="shrink-0 px-4 py-2 bg-[#25D366] text-[#0a0a0a] text-sm font-semibold rounded-lg hover:brightness-110 transition-all"
+            >
+              Message on WhatsApp →
+            </a>
           </div>
         )}
 
@@ -253,6 +319,36 @@ export default function Admin() {
                         </button>
                       </Form>
                     </div>
+
+                    {/* Reschedule to a new slot (stays pending confirmation) */}
+                    <Form method="post" className="flex flex-wrap items-end gap-2 mt-3 pt-3 border-t border-white/5">
+                      <input type="hidden" name="intent" value="rescheduleBooking" />
+                      <input type="hidden" name="reservationId" value={b.id} />
+                      <label className="text-xs text-white/50">
+                        <span className="block mb-1">New date</span>
+                        <input
+                          type="date"
+                          name="bookingDate"
+                          defaultValue={b.booking_date}
+                          className="px-2 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white"
+                        />
+                      </label>
+                      <label className="text-xs text-white/50">
+                        <span className="block mb-1">New time</span>
+                        <select
+                          name="bookingTime"
+                          defaultValue={b.booking_time?.slice(0, 5)}
+                          className="px-2 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white"
+                        >
+                          {SLOT_TIMES.map((t) => (
+                            <option key={t} value={t}>{t}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <button className="px-4 py-2 border border-white/20 text-white text-sm rounded-lg hover:bg-white/5 transition-all">
+                        Reschedule
+                      </button>
+                    </Form>
                   </li>
                 );
               })}

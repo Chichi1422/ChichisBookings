@@ -185,6 +185,17 @@ export function ChiChisSpa({ services, homeCallFee }: ChiChisSpaProps) {
         </div>
       </section>
 
+      {/* Amenities */}
+      <section className="py-8 border-b border-white/5">
+        <div className="max-w-7xl mx-auto px-6">
+          <div className="flex flex-wrap items-center justify-center gap-x-10 gap-y-3 text-sm text-white/70">
+            <span className="flex items-center gap-2"><span className="text-lg">🅿️</span> Free parking on-site</span>
+            <span className="flex items-center gap-2"><span className="text-lg">🚿</span> Shower available</span>
+            <span className="flex items-center gap-2"><span className="text-lg">❋</span> Home service available</span>
+          </div>
+        </div>
+      </section>
+
       {/* Services Section */}
       <section id="services" className="py-24 relative">
         <div className="max-w-7xl mx-auto px-6">
