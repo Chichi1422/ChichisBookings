@@ -234,6 +234,57 @@ export async function markDeclined(reservationId: string): Promise<ConfirmResult
 }
 
 /**
+ * Owner moves a paid (pending-confirmation) booking to a new date/time. The
+ * EXCLUDE constraint rejects a move that overlaps another live booking. The
+ * booking stays at 'paid' — the owner still confirms afterwards. No calendar
+ * event exists yet at this stage, so there's nothing to move on Google.
+ */
+export async function rescheduleBooking(
+  reservationId: string,
+  bookingDate: string,
+  bookingTime: string,
+): Promise<
+  | { ok: true; booking: BookingRow }
+  | { ok: false; error: 'slot_taken' | 'invalid_time' | 'not_paid' | 'db_error'; detail?: string }
+> {
+  const existing = await getReservation(reservationId);
+  if (!existing || existing.status !== 'paid') return { ok: false, error: 'not_paid' };
+
+  let timing: { start_at: string; end_at: string };
+  try {
+    timing = buildStartEnd(bookingDate, bookingTime, existing.duration_minutes);
+  } catch (e) {
+    return { ok: false, error: 'invalid_time', detail: (e as Error).message };
+  }
+  if (new Date(timing.start_at).getTime() < Date.now()) {
+    return { ok: false, error: 'invalid_time', detail: 'slot in the past' };
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from('bookings')
+    .update({
+      booking_date: bookingDate,
+      booking_time: bookingTime,
+      start_at: timing.start_at,
+      end_at: timing.end_at,
+    })
+    .eq('id', reservationId)
+    .eq('status', 'paid')
+    .select('*')
+    .maybeSingle();
+
+  if (error) {
+    if (error.code === '23P01' || /exclu/i.test(error.message)) {
+      return { ok: false, error: 'slot_taken' };
+    }
+    console.error('[bookings] reschedule failed:', error);
+    return { ok: false, error: 'db_error', detail: error.message };
+  }
+  if (!data) return { ok: false, error: 'not_paid' };
+  return { ok: true, booking: data as BookingRow };
+}
+
+/**
  * Records a completed refund reference against a declined booking.
  */
 export async function recordRefund(reservationId: string, refundRef: string): Promise<void> {

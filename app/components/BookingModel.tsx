@@ -739,6 +739,11 @@ export function BookingModal({
                 </p>
               )}
             </div>
+            {!isHomeCall && (
+              <p className="text-white/50 text-sm mb-3">
+                🅿️ Free parking and a 🚿 shower are available at the spa.
+              </p>
+            )}
             <p className="text-white/40 text-sm mb-4">You'll receive a confirmation via WhatsApp</p>
             <button
               onClick={onClose}
