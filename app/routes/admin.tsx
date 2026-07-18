@@ -1,7 +1,6 @@
 // app/routes/admin.tsx
 // Owner-only admin panel. Loader gates with assertOwner.
 
-import { useState } from 'react';
 import { Form, Link, useLoaderData, useSearchParams, redirect } from 'react-router';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from 'react-router';
 import { assertOwner } from '~/lib/auth.server';
@@ -17,7 +16,13 @@ import {
   rescheduleBooking,
   type BookingRow,
 } from '~/lib/bookings.server';
-import { whatsappLink, confirmedMessage, declinedMessage, rescheduledMessage } from '~/lib/whatsapp';
+import {
+  whatsappLink,
+  confirmedMessage,
+  declinedMessage,
+  rescheduledMessage,
+  inquiryMessage,
+} from '~/lib/whatsapp';
 
 const SLOT_TIMES = ['09:00', '10:00', '11:00', '12:00', '14:00', '15:00', '16:00', '17:00', '18:00'];
 
@@ -134,7 +139,9 @@ export async function action({ request }: ActionFunctionArgs) {
 export default function Admin() {
   const data = useLoaderData<typeof loader>() as LoaderData;
   const [searchParams] = useSearchParams();
-  const [message] = useState<{ type: 'success' | 'error'; text: string } | null>(() => {
+  // Derived from the URL (not useState) so dismissing — navigating to plain
+  // /admin — actually clears it. State would survive the navigation.
+  const message = (() => {
     const ok = searchParams.get('ok');
     const error = searchParams.get('error');
     const okText: Record<string, string> = {
@@ -153,10 +160,10 @@ export default function Admin() {
       invalid_time: 'That date/time is invalid or in the past.',
       missing_datetime: 'Pick both a date and a time to reschedule.',
     };
-    if (ok) return { type: 'success', text: okText[ok] ?? 'Done.' };
-    if (error) return { type: 'error', text: errText[error] ?? `Error: ${error}` };
+    if (ok) return { type: 'success' as const, text: okText[ok] ?? 'Done.' };
+    if (error) return { type: 'error' as const, text: errText[error] ?? `Error: ${error}` };
     return null;
-  });
+  })();
 
   const calendarOk = data.calendar.configured && !data.calendar.error;
 
@@ -207,21 +214,32 @@ export default function Admin() {
                 message.
               </div>
             </div>
-            <a
-              href={whatsappLink(
-                data.justActioned.booking.customer_phone,
-                data.justActioned.kind === 'confirmed'
-                  ? confirmedMessage(data.justActioned.booking)
-                  : data.justActioned.kind === 'rescheduled'
-                  ? rescheduledMessage(data.justActioned.booking)
-                  : declinedMessage(data.justActioned.booking),
-              )}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="shrink-0 px-4 py-2 bg-[#25D366] text-[#0a0a0a] text-sm font-semibold rounded-lg hover:brightness-110 transition-all"
-            >
-              Message on WhatsApp →
-            </a>
+            <div className="flex items-center gap-2 shrink-0">
+              <a
+                href={whatsappLink(
+                  data.justActioned.booking.customer_phone,
+                  data.justActioned.kind === 'confirmed'
+                    ? confirmedMessage(data.justActioned.booking)
+                    : data.justActioned.kind === 'rescheduled'
+                    ? rescheduledMessage(data.justActioned.booking)
+                    : declinedMessage(data.justActioned.booking),
+                )}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-4 py-2 bg-[#25D366] text-[#0a0a0a] text-sm font-semibold rounded-lg hover:brightness-110 transition-all"
+              >
+                Message on WhatsApp →
+              </a>
+              {/* Dismiss = drop the ok/sent params; message + banner are URL-derived. */}
+              <Link
+                to="/admin"
+                replace
+                aria-label="Dismiss"
+                className="w-9 h-9 flex items-center justify-center rounded-lg border border-white/15 text-white/60 hover:bg-white/10 transition-colors"
+              >
+                ✕
+              </Link>
+            </div>
           </div>
         )}
 
@@ -318,6 +336,14 @@ export default function Admin() {
                           Decline{b.payment_method === 'paypal' ? ' & refund' : ''}
                         </button>
                       </Form>
+                      <a
+                        href={whatsappLink(b.customer_phone, inquiryMessage(b))}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-4 py-2 border border-[#25D366]/40 text-[#25D366] text-sm rounded-lg hover:bg-[#25D366]/10 transition-all"
+                      >
+                        WhatsApp
+                      </a>
                     </div>
 
                     {/* Reschedule to a new slot (stays pending confirmation) */}
@@ -374,7 +400,19 @@ export default function Admin() {
                       {b.booking_date} {b.booking_time} · {b.is_home_call ? 'Home' : 'Spa'} · {b.status}
                     </div>
                   </div>
-                  <div className="text-[#f48fb1] font-semibold">R{b.amount_zar ?? '—'}</div>
+                  <div className="flex flex-col items-end gap-2">
+                    <div className="text-[#f48fb1] font-semibold">R{b.amount_zar ?? '—'}</div>
+                    {/* Re-send the confirmation any time — handles messaging
+                        several customers in a row, not just the last action. */}
+                    <a
+                      href={whatsappLink(b.customer_phone, confirmedMessage(b))}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3 py-1.5 border border-[#25D366]/40 text-[#25D366] text-xs rounded-lg hover:bg-[#25D366]/10 transition-all"
+                    >
+                      WhatsApp
+                    </a>
+                  </div>
                 </li>
               ))}
             </ul>
