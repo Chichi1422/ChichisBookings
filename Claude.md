@@ -79,7 +79,14 @@ GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_CALENDAR_ID
 - Home-call fee and FX markup are owner-managed in `app.pricing_config` (edit at `/admin/pricing`); `DEFAULT_HOME_CALL_FEE_ZAR` is only a fallback if the row is unreadable.
 
 ## Current Status
-- UI and booking flow are functional.
+- UI and booking flow are functional; live at chichisbeauty.com (www is canonical).
 - Slot-reservation pipeline fixes the previous race condition.
-- Admin panel is owner-gated; tokens persisted in Supabase.
+- Admin panel is owner-gated; confirm/decline/reschedule with click-to-send WhatsApp.
 - API integrations (PayPal, VALR, Google Calendar) are scaffolded and tested. **VALR integration hidden in UI for now.**
+- **PayPal is still in SANDBOX mode.** Go-live checklist (all must change together, then redeploy):
+  1. `PAYPAL_MODE=live`
+  2. Live `PAYPAL_CLIENT_ID` / `PAYPAL_CLIENT_SECRET`
+  3. Live `VITE_PAYPAL_CLIENT_ID` (build-time — requires the redeploy)
+  4. New `PAYPAL_WEBHOOK_ID` — **webhooks are per-app**: the live app needs its own webhook created in the PayPal dashboard (same URL, `PAYMENT.CAPTURE.COMPLETED`); the sandbox webhook id will NOT work
+- PII at rest (customer name/phone) is AES-256-GCM encrypted via `app/lib/crypto.server.ts` (`PII_ENCRYPTION_KEY`). Legacy plaintext rows read back fine (`enc:v1:` prefix discriminates).
+- Sentry (free tier) wired: `SENTRY_DSN` (server chokepoints) + `VITE_SENTRY_DSN` (browser).
