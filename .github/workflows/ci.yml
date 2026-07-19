@@ -1,0 +1,29 @@
+# Minimum merge gate: typecheck + production build on every PR and on main.
+# No tests exist yet — when they do, add the test step here.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      # Dummies so any code path that eagerly reads env during build has
+      # something to chew on. Nothing here is a real credential.
+      SUPABASE_URL: https://ci-dummy.supabase.co
+      SUPABASE_ANON_KEY: ci-dummy
+      SUPABASE_SERVICE_ROLE_KEY: ci-dummy
+      OWNER_EMAIL: ci@example.com
+      APP_URL: https://ci.example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
