@@ -40,6 +40,11 @@ export default function Privacy() {
           </li>
         </ul>
 
+        <p className={p}>
+          Your name and phone number are encrypted before being stored in our database, in
+          addition to the disk-level encryption our hosting providers apply.
+        </p>
+
         <h2 className={h2}>Why we collect it</h2>
         <p className={p}>
           Solely to provide your appointment: reserving your time slot, taking payment,

@@ -5,6 +5,17 @@
 
 import { supabaseAdmin } from './supabase.server';
 import { lookupService, totalPrice, getPricingConfig } from './services.server';
+import { encryptPII, decryptPII } from './crypto.server';
+
+// Personal fields are encrypted at rest; every row leaving this module is
+// decrypted here so callers only ever see plaintext.
+function decryptRow(row: BookingRow): BookingRow {
+  return {
+    ...row,
+    customer_name: decryptPII(row.customer_name),
+    customer_phone: decryptPII(row.customer_phone),
+  };
+}
 
 const TIMEZONE = process.env.BUSINESS_TIMEZONE || 'Africa/Johannesburg';
 const PAID_RESERVATION_TTL_MIN = 10;
@@ -117,8 +128,8 @@ export async function reserveSlot(input: ReserveSlotInput): Promise<ReserveResul
       service: svc.service,
       duration: svc.duration,
       duration_minutes: svc.durationMinutes,
-      customer_name: input.customerName,
-      customer_phone: input.customerPhone,
+      customer_name: encryptPII(input.customerName),
+      customer_phone: encryptPII(input.customerPhone),
       booking_date: input.bookingDate,
       booking_time: input.bookingTime,
       start_at: timing.start_at,
@@ -142,7 +153,7 @@ export async function reserveSlot(input: ReserveSlotInput): Promise<ReserveResul
     return { ok: false, error: 'db_error', detail: error.message };
   }
 
-  return { ok: true, reservation: data as BookingRow, amountZar: amount };
+  return { ok: true, reservation: decryptRow(data as BookingRow), amountZar: amount };
 }
 
 /**
@@ -180,7 +191,7 @@ export async function markPaid(
     // Either missing, or already paid/expired/cancelled.
     return { ok: false, error: 'reservation_expired' };
   }
-  return { ok: true, booking: data as BookingRow };
+  return { ok: true, booking: decryptRow(data as BookingRow) };
 }
 
 /**
@@ -205,7 +216,7 @@ export async function markConfirmed(
   if (!data) {
     return { ok: false, error: 'reservation_missing' };
   }
-  return { ok: true, booking: data as BookingRow };
+  return { ok: true, booking: decryptRow(data as BookingRow) };
 }
 
 /**
@@ -230,7 +241,7 @@ export async function markDeclined(reservationId: string): Promise<ConfirmResult
     // Not paid, missing, or already handled by a concurrent decline.
     return { ok: false, error: 'reservation_missing' };
   }
-  return { ok: true, booking: data as BookingRow };
+  return { ok: true, booking: decryptRow(data as BookingRow) };
 }
 
 /**
@@ -281,7 +292,7 @@ export async function rescheduleBooking(
     return { ok: false, error: 'db_error', detail: error.message };
   }
   if (!data) return { ok: false, error: 'not_paid' };
-  return { ok: true, booking: data as BookingRow };
+  return { ok: true, booking: decryptRow(data as BookingRow) };
 }
 
 /**
@@ -318,7 +329,8 @@ export async function getReservation(reservationId: string): Promise<BookingRow 
     console.error('[bookings] getReservation failed:', error);
     return null;
   }
-  return (data as BookingRow | null) ?? null;
+  const row = (data as BookingRow | null) ?? null;
+  return row ? decryptRow(row) : null;
 }
 
 /**
@@ -360,7 +372,7 @@ export async function getAwaitingDecision(): Promise<BookingRow[]> {
     console.error('[bookings] getAwaitingDecision failed:', error);
     return [];
   }
-  return (data as BookingRow[]) ?? [];
+  return ((data as BookingRow[]) ?? []).map(decryptRow);
 }
 
 /**
@@ -378,5 +390,5 @@ export async function getUpcomingBookings(limit = 25): Promise<BookingRow[]> {
     console.error('[bookings] getUpcomingBookings failed:', error);
     return [];
   }
-  return (data as BookingRow[]) ?? [];
+  return ((data as BookingRow[]) ?? []).map(decryptRow);
 }
