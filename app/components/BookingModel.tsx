@@ -577,8 +577,18 @@ export function BookingModal({
               </div>
             </div>
 
-            {/* PayPal Payment */}
-            {paymentMethod === 'paypal' && reservation && (
+            {/* PayPal Payment. In production a missing VITE_PAYPAL_CLIENT_ID
+                must fail visibly — the old silent 'test' fallback loaded the
+                sandbox SDK, which quietly can't take real money. */}
+            {paymentMethod === 'paypal' && reservation && !import.meta.env.VITE_PAYPAL_CLIENT_ID && import.meta.env.PROD && (
+              <div className="bg-red-500/20 border border-red-500/50 rounded-xl p-4">
+                <p className="text-red-300 text-sm">
+                  Card payments are temporarily unavailable. Please choose cash, or contact
+                  us on WhatsApp to complete your booking.
+                </p>
+              </div>
+            )}
+            {paymentMethod === 'paypal' && reservation && (import.meta.env.VITE_PAYPAL_CLIENT_ID || import.meta.env.DEV) && (
               <PayPalScriptProvider
                 key={payCurrency}
                 options={{
@@ -687,6 +697,18 @@ export function BookingModal({
                 </button>
               </div>
             )}
+
+            <p className="text-white/40 text-xs text-center">
+              By booking you agree to our{' '}
+              <a href="/terms" target="_blank" rel="noopener noreferrer" className="underline hover:text-[#f48fb1]">
+                Terms &amp; Booking Policy
+              </a>{' '}
+              and{' '}
+              <a href="/privacy" target="_blank" rel="noopener noreferrer" className="underline hover:text-[#f48fb1]">
+                Privacy Policy
+              </a>
+              .
+            </p>
 
             <button
               onClick={async () => {

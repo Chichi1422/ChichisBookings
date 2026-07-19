@@ -5,6 +5,7 @@
 import { getReservation, markPaid } from '~/lib/bookings.server';
 import { quoteAmount, type QuoteCurrency } from '~/lib/fx.server';
 import { PAYPAL_API_BASE, getPayPalAccessToken, refundCapture } from '~/lib/paypal.server';
+import { sendAlert } from '~/lib/alerts.server';
 
 // Currencies PayPal can process for this account. ZAR is intentionally absent —
 // PayPal does not support it, so ZAR bookings go through cash/VALR instead.
@@ -139,9 +140,35 @@ async function captureOrder(formData: FormData) {
     // Atomic: only succeeds if still pending + unexpired.
     const paid = await markPaid(reservationId, captureId, paidRecord);
     if (!paid.ok) {
+      // Before treating this as expired, check whether the capture WEBHOOK beat
+      // us to markPaid with this same capture — that's a success, and refunding
+      // it would claw back a valid payment.
+      const current = await getReservation(reservationId);
+      if (
+        current &&
+        (current.status === 'paid' || current.status === 'confirmed') &&
+        current.payment_provider_ref === captureId
+      ) {
+        return Response.json({
+          success: true,
+          pendingConfirmation: true,
+          transactionId: captureId,
+          status: data.status,
+        });
+      }
+
       // Reservation expired / already used. Refund and tell the user.
       const refund = await refundCapture(captureId);
-      if (!refund.ok) console.error('PayPal refund after expired reservation failed:', refund.error);
+      if (!refund.ok) {
+        console.error('PayPal refund after expired reservation failed:', refund.error);
+        await sendAlert('PayPal refund FAILED — manual refund needed', [
+          `A payment was captured for an expired reservation and the automatic refund failed.`,
+          `Refund it manually in the PayPal dashboard.`,
+          `Capture ID: ${captureId}`,
+          `Reservation: ${reservationId}`,
+          `Amount: ${paidCurrency ?? '?'} ${paidValue ?? '?'}`,
+        ]);
+      }
       return Response.json(
         { error: 'reservation_expired', refunded: refund.ok },
         { status: 410 },
@@ -158,6 +185,16 @@ async function captureOrder(formData: FormData) {
     });
   } catch (error) {
     console.error('PayPal capture error:', error);
+    // We may have crashed between PayPal capturing and the DB recording it —
+    // money in limbo until the capture webhook reconciles. Tell the owner.
+    await sendAlert('PayPal capture flow crashed — check PayPal dashboard', [
+      `The capture flow threw before the booking could be updated.`,
+      `Order ID: ${(formData.get('orderID') as string) || 'unknown'}`,
+      `If a payment shows as captured in PayPal but no booking appears in`,
+      `"Pending confirmation", the capture webhook should reconcile it shortly;`,
+      `otherwise refund manually.`,
+      `Error: ${error instanceof Error ? error.message : String(error)}`,
+    ]);
     return Response.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

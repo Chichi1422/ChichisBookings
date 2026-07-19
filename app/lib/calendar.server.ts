@@ -3,6 +3,7 @@
 
 import { getCalendarClient, getCalendarId } from './google.server';
 import { getReservation, markConfirmed } from './bookings.server';
+import { sendAlert } from './alerts.server';
 
 interface ConfirmResponse {
   status: number;
@@ -78,6 +79,13 @@ export async function confirmReservationOnCalendar(
     // Payment captured, calendar failed. Row stays at 'paid' so admin can
     // sync manually. Do not lie to the customer.
     console.error('[calendar] insert failed:', err);
+    await sendAlert('Calendar insert failed — booking stuck at Pending confirmation', [
+      `Confirming a booking failed because Google Calendar was unreachable.`,
+      `The booking is still in "Pending confirmation" — open /admin and confirm again.`,
+      `Booking: ${reservation.service} for ${reservation.customer_name}`,
+      `When: ${reservation.booking_date} ${reservation.booking_time}`,
+      `Error: ${err instanceof Error ? err.message : String(err)}`,
+    ]);
     return {
       status: 200,
       responseBody: {

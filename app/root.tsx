@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   isRouteErrorResponse,
   Links,
@@ -8,9 +9,20 @@ import {
 } from "react-router";
 import { Analytics } from "@vercel/analytics/react";
 import { SpeedInsights } from "@vercel/speed-insights/react";
+import * as Sentry from "@sentry/react";
 
 import type { Route } from "./+types/root";
 import "./app.css";
+
+// Browser-side error monitoring. No-op during SSR and when the DSN is unset.
+if (typeof document !== "undefined" && import.meta.env.VITE_SENTRY_DSN) {
+  Sentry.init({
+    dsn: import.meta.env.VITE_SENTRY_DSN,
+    environment: import.meta.env.MODE,
+    // Free tier: errors only, no performance tracing quota burn.
+    tracesSampleRate: 0,
+  });
+}
 
 export const links: Route.LinksFunction = () => [
   { rel: "preconnect", href: "https://fonts.googleapis.com" },
@@ -53,6 +65,13 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   let message = "Oops!";
   let details = "An unexpected error occurred.";
   let stack: string | undefined;
+
+  // Report real errors (not 404s and other route responses) to Sentry.
+  useEffect(() => {
+    if (!isRouteErrorResponse(error) && import.meta.env.VITE_SENTRY_DSN) {
+      Sentry.captureException(error);
+    }
+  }, [error]);
 
   if (isRouteErrorResponse(error)) {
     message = error.status === 404 ? "404" : "Error";
