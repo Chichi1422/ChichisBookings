@@ -7,6 +7,7 @@ import { assertOwner } from '~/lib/auth.server';
 import { isCalendarConfigured, verifyCalendarAccess } from '~/lib/google.server';
 import { confirmReservationOnCalendar } from '~/lib/calendar.server';
 import { refundCapture } from '~/lib/paypal.server';
+import { sendAlert } from '~/lib/alerts.server';
 import {
   getAwaitingDecision,
   getUpcomingBookings,
@@ -116,7 +117,16 @@ export async function action({ request }: ActionFunctionArgs) {
     const ref = reservation.payment_provider_ref;
     if (reservation.payment_method === 'paypal' && ref && ref !== 'CASH-PENDING') {
       const refund = await refundCapture(ref);
-      if (!refund.ok) return back('error=declined_but_refund_failed');
+      if (!refund.ok) {
+        await sendAlert('Decline refund FAILED — manual refund needed', [
+          `A booking was declined but the PayPal refund failed.`,
+          `Refund it manually in the PayPal dashboard.`,
+          `Capture ID: ${ref}`,
+          `Customer: ${reservation.customer_name} (${reservation.customer_phone})`,
+          `Amount: ${reservation.paid_currency ?? 'ZAR'} ${reservation.paid_amount ?? reservation.amount_zar ?? '?'}`,
+        ]);
+        return back('error=declined_but_refund_failed');
+      }
       if (refund.refundId) await recordRefund(reservationId, refund.refundId);
       return back(`ok=declined_refunded&sent=${reservationId}`);
     }
