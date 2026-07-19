@@ -7,6 +7,7 @@ export default [
 
   // API Routes
   route("api/paypal/orders", "routes/api.paypal.orders.ts"),
+  route("api/paypal/webhook", "routes/api.paypal.webhook.ts"),
   route("api/calendar", "routes/api.calendar.ts"),
   route("api/valr", "routes/api.valr.ts"),
   route("api/fx", "routes/api.fx.ts"),

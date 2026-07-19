@@ -140,6 +140,23 @@ async function captureOrder(formData: FormData) {
     // Atomic: only succeeds if still pending + unexpired.
     const paid = await markPaid(reservationId, captureId, paidRecord);
     if (!paid.ok) {
+      // Before treating this as expired, check whether the capture WEBHOOK beat
+      // us to markPaid with this same capture — that's a success, and refunding
+      // it would claw back a valid payment.
+      const current = await getReservation(reservationId);
+      if (
+        current &&
+        (current.status === 'paid' || current.status === 'confirmed') &&
+        current.payment_provider_ref === captureId
+      ) {
+        return Response.json({
+          success: true,
+          pendingConfirmation: true,
+          transactionId: captureId,
+          status: data.status,
+        });
+      }
+
       // Reservation expired / already used. Refund and tell the user.
       const refund = await refundCapture(captureId);
       if (!refund.ok) {
