@@ -12,6 +12,8 @@
     "@paypal/react-paypal-js": "^8.9.2",
     "@react-router/node": "7.12.0",
     "@react-router/serve": "7.12.0",
+    "@sentry/node": "^10.66.0",
+    "@sentry/react": "^10.66.0",
     "@supabase/ssr": "^0.5.2",
     "@supabase/supabase-js": "^2.45.4",
     "@vercel/analytics": "^2.0.1",
