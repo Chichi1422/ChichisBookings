@@ -27,6 +27,8 @@ React Router v7 full-stack web app for **Chi Chi's Beauty Spa** — a Fish Hoek,
 | `app/lib/services.server.ts` | Authoritative catalog + pricing config, DB-backed (`getServiceCatalog`, `lookupService`, `getPricingConfig`) + admin CRUD |
 | `app/lib/fx.server.ts` | ZAR→USD/EUR conversion — live cached rate + owner markup (`quoteAmount`) |
 | `app/routes/api.paypal.orders.ts` | PayPal create/capture; currency-aware (USD/EUR); rejects without a live reservation; refunds on expired capture |
+| `app/routes/api.paypal.webhook.ts` | Signature-verified `PAYMENT.CAPTURE.COMPLETED` reconciliation (crash-window safety net) |
+| `app/lib/alerts.server.ts` | `sendAlert` — owner email on money-critical failures (Resend; no-op without `RESEND_API_KEY`) |
 | `app/routes/api.valr.ts` | VALR Pay info + verification, keyed by `reservationId` |
 | `app/routes/api.calendar.ts` | Slot fetch (DB ∪ Google), reserve/release intents, calendar event insert |
 | `app/routes/api.fx.ts` | Live currency quote for a reservation (used by the booking modal) |
@@ -50,8 +52,11 @@ React Router v7 full-stack web app for **Chi Chi's Beauty Spa** — a Fish Hoek,
 - **Owner confirm/decline gate:** payment does **not** auto-confirm. A captured booking sits at `status='paid'` and appears in the admin's "Pending confirmation" list. The owner **confirms** (→ `confirmReservationOnCalendar` creates the calendar event → `status='confirmed'`) or **declines** (`markDeclined` flips `paid`→`declined` atomically, then PayPal captures are refunded via `refundCapture`; cash needs no refund, VALR is refunded manually). `declined` is outside the overlap constraint, so declining frees the slot. Customers are told payment was received and the booking is *pending confirmation* — never told it's confirmed prematurely. No automated customer notification exists yet; the owner messages via WhatsApp.
 - **Calendar failure path:** if `events.insert` fails during confirmation, `markConfirmed` isn't reached, the row stays at `status='paid'`, and it remains in "Pending confirmation" for the owner to retry. The customer is never told a booking is on the calendar when it isn't.
 - **Pricing:** ZAR is the base/source-of-truth price, stored in `app.service_groups`/`app.service_options` and managed from `/admin/pricing`. PayPal cannot process ZAR, so card payments are charged in USD/EUR, converted at checkout by `app/lib/fx.server.ts` (live cached rate + owner-set markup %). ZAR-native payment is cash/VALR only.
+- **Payment reconciliation + alerting:** `/api/paypal/webhook` (signature-verified) is the safety net for the crash window between PayPal capturing and `markPaid` recording — it records missed captures or refunds orphaned ones. The sync capture path has a race guard so a webhook that wins the race isn't mistaken for an expired reservation (which would wrongly refund). Money-critical failures (refund failed, capture flow crashed, calendar insert failed) email the owner via `sendAlert`.
+- **Legal pages:** `/privacy` (POPIA) and `/terms` (incl. refund policy). Linked from the footer and the payment step. Owner should review wording before treating as final legal text.
 - VALR integration uses HMAC-SHA512 signed requests.
 - The old inline booking modal in `spa.tsx` is commented out; the `BookingModal` component is used.
+- CI (`.github/workflows/ci.yml`) runs typecheck + build on every PR and push to main.
 
 ## Environment Variables Needed
 See `.env.example` for the full list. Required:

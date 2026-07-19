@@ -17,6 +17,10 @@ export default [
   route("booking/success", "routes/booking.success.tsx"),
   route("booking/cancel", "routes/booking.cancel.tsx"),
 
+  // Legal
+  route("privacy", "routes/privacy.tsx"),
+  route("terms", "routes/terms.tsx"),
+
   // Admin (owner-only)
   route("admin", "routes/admin.tsx"),
   route("admin/pricing", "routes/admin.pricing.tsx"),
