@@ -1,7 +1,7 @@
 // app/routes/admin.tsx
 // Owner-only admin panel. Loader gates with assertOwner.
 
-import { Form, Link, useLoaderData, useSearchParams, redirect } from 'react-router';
+import { Form, Link, useLoaderData, useSearchParams, useRevalidator, redirect } from 'react-router';
 import type { ActionFunctionArgs, LoaderFunctionArgs } from 'react-router';
 import { assertOwner } from '~/lib/auth.server';
 import { isCalendarConfigured, verifyCalendarAccess } from '~/lib/google.server';
@@ -11,11 +11,14 @@ import { sendAlert } from '~/lib/alerts.server';
 import {
   getAwaitingDecision,
   getUpcomingBookings,
+  getNotificationQueue,
   getReservation,
   markDeclined,
   recordRefund,
   rescheduleBooking,
+  setPendingNotification,
   type BookingRow,
+  type NotificationKind,
 } from '~/lib/bookings.server';
 import {
   whatsappLink,
@@ -41,32 +44,22 @@ interface LoaderData {
   calendar: CalendarStatus;
   awaitingDecision: BookingRow[];
   upcoming: BookingRow[];
-  // The booking just confirmed/declined/rescheduled, so the UI can offer a
-  // pre-filled WhatsApp message to the customer.
-  justActioned: { booking: BookingRow; kind: 'confirmed' | 'declined' | 'rescheduled' } | null;
+  // Bookings whose latest decision the customer hasn't been told about yet.
+  // Persistent (DB-backed), so new actions never overwrite earlier entries;
+  // the owner messages and clears each one individually.
+  notificationQueue: BookingRow[];
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const session = await assertOwner(request);
 
   const configured = isCalendarConfigured();
-  const [calendarError, awaitingDecision, upcoming] = await Promise.all([
+  const [calendarError, awaitingDecision, upcoming, notificationQueue] = await Promise.all([
     configured ? verifyCalendarAccess() : Promise.resolve('not_configured'),
     getAwaitingDecision(),
     getUpcomingBookings(25),
+    getNotificationQueue(),
   ]);
-
-  const url = new URL(request.url);
-  const sent = url.searchParams.get('sent');
-  let justActioned: LoaderData['justActioned'] = null;
-  if (sent) {
-    const booking = await getReservation(sent);
-    if (booking) {
-      const ok = url.searchParams.get('ok');
-      const kind = ok === 'confirmed' ? 'confirmed' : ok === 'rescheduled' ? 'rescheduled' : 'declined';
-      justActioned = { booking, kind };
-    }
-  }
 
   return new Response(
     JSON.stringify({
@@ -77,7 +70,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       },
       awaitingDecision,
       upcoming,
-      justActioned,
+      notificationQueue,
     } satisfies LoaderData),
     {
       headers: { ...Object.fromEntries(session.headers), 'Content-Type': 'application/json' },
@@ -99,7 +92,8 @@ export async function action({ request }: ActionFunctionArgs) {
   if (intent === 'confirmBooking') {
     const result = await confirmReservationOnCalendar(reservationId);
     const body = result.responseBody;
-    if (body?.success && !body?.warning) return back(`ok=confirmed&sent=${reservationId}`);
+    // markConfirmed queues the customer notification itself.
+    if (body?.success && !body?.warning) return back('ok=confirmed');
     if (body?.warning === 'payment_received_calendar_pending') return back('error=calendar_unreachable');
     return back(`error=${encodeURIComponent(body?.error || body?.warning || 'confirm_failed')}`);
   }
@@ -128,9 +122,13 @@ export async function action({ request }: ActionFunctionArgs) {
         return back('error=declined_but_refund_failed');
       }
       if (refund.refundId) await recordRefund(reservationId, refund.refundId);
-      return back(`ok=declined_refunded&sent=${reservationId}`);
+      // Queue the customer notification only now that the refund is real —
+      // the pre-written message says "your payment has been fully refunded".
+      await setPendingNotification(reservationId, 'declined');
+      return back('ok=declined_refunded');
     }
-    return back(`ok=declined&sent=${reservationId}`);
+    await setPendingNotification(reservationId, 'declined');
+    return back('ok=declined');
   }
 
   if (intent === 'rescheduleBooking') {
@@ -139,8 +137,13 @@ export async function action({ request }: ActionFunctionArgs) {
     if (!bookingDate || !bookingTime) return back('error=missing_datetime');
 
     const result = await rescheduleBooking(reservationId, bookingDate, bookingTime);
-    if (result.ok) return back(`ok=rescheduled&sent=${reservationId}`);
+    if (result.ok) return back('ok=rescheduled');
     return back(`error=${result.error}`);
+  }
+
+  if (intent === 'clearNotification') {
+    await setPendingNotification(reservationId, null);
+    return redirect('/admin', { headers: session.headers });
   }
 
   return back('error=unknown_intent');
@@ -149,6 +152,7 @@ export async function action({ request }: ActionFunctionArgs) {
 export default function Admin() {
   const data = useLoaderData<typeof loader>() as LoaderData;
   const [searchParams] = useSearchParams();
+  const revalidator = useRevalidator();
   // Derived from the URL (not useState) so dismissing — navigating to plain
   // /admin — actually clears it. State would survive the navigation.
   const message = (() => {
@@ -210,46 +214,66 @@ export default function Admin() {
           </div>
         )}
 
-        {data.justActioned && (
-          <div className="mb-6 p-4 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between gap-4">
-            <div className="text-sm">
-              <div className="font-medium">Let {data.justActioned.booking.customer_name} know</div>
-              <div className="text-white/50">
-                Opens WhatsApp with a pre-written{' '}
-                {data.justActioned.kind === 'confirmed'
-                  ? 'confirmation'
-                  : data.justActioned.kind === 'rescheduled'
-                  ? 'reschedule'
-                  : 'decline'}{' '}
-                message.
-              </div>
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              <a
-                href={whatsappLink(
-                  data.justActioned.booking.customer_phone,
-                  data.justActioned.kind === 'confirmed'
-                    ? confirmedMessage(data.justActioned.booking)
-                    : data.justActioned.kind === 'rescheduled'
-                    ? rescheduledMessage(data.justActioned.booking)
-                    : declinedMessage(data.justActioned.booking),
-                )}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-4 py-2 bg-[#25D366] text-[#0a0a0a] text-sm font-semibold rounded-lg hover:brightness-110 transition-all"
-              >
-                Message on WhatsApp →
-              </a>
-              {/* Dismiss = drop the ok/sent params; message + banner are URL-derived. */}
-              <Link
-                to="/admin"
-                replace
-                aria-label="Dismiss"
-                className="w-9 h-9 flex items-center justify-center rounded-lg border border-white/15 text-white/60 hover:bg-white/10 transition-colors"
-              >
-                ✕
-              </Link>
-            </div>
+        {/* To notify — persistent, DB-backed queue. New confirms/declines add
+            entries instead of overwriting; each is messaged/cleared on its own. */}
+        {data.notificationQueue.length > 0 && (
+          <div className="gradient-border rounded-2xl p-6 mb-6">
+            <h2 className="font-playfair text-xl mb-2">To notify</h2>
+            <p className="text-white/60 text-sm mb-4">
+              Customers who haven't been told about a decision yet. Message on WhatsApp,
+              then clear the entry.
+            </p>
+            <ul className="divide-y divide-white/10">
+              {data.notificationQueue.map((b) => {
+                const kind = (b.pending_notification ?? 'confirmed') as NotificationKind;
+                const msg =
+                  kind === 'confirmed'
+                    ? confirmedMessage(b)
+                    : kind === 'rescheduled'
+                    ? rescheduledMessage(b)
+                    : declinedMessage(b);
+                const chip =
+                  kind === 'confirmed'
+                    ? 'bg-green-500/20 text-green-300'
+                    : kind === 'rescheduled'
+                    ? 'bg-yellow-500/20 text-yellow-300'
+                    : 'bg-red-500/20 text-red-300';
+                return (
+                  <li key={b.id} className="py-3 flex items-center justify-between gap-4 text-sm">
+                    <div className="min-w-0">
+                      <span className={`inline-block px-2 py-0.5 rounded-full text-xs mr-2 capitalize ${chip}`}>
+                        {kind}
+                      </span>
+                      <span className="font-medium">{b.customer_name}</span>
+                      <span className="text-white/50">
+                        {' '}· {b.service} · {b.booking_date} {b.booking_time?.slice(0, 5)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <a
+                        href={whatsappLink(b.customer_phone, msg)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-4 py-2 bg-[#25D366] text-[#0a0a0a] text-sm font-semibold rounded-lg hover:brightness-110 transition-all"
+                      >
+                        WhatsApp
+                      </a>
+                      <Form method="post">
+                        <input type="hidden" name="intent" value="clearNotification" />
+                        <input type="hidden" name="reservationId" value={b.id} />
+                        <button
+                          aria-label="Clear"
+                          title="Clear — customer has been notified"
+                          className="w-9 h-9 flex items-center justify-center rounded-lg border border-white/15 text-white/60 hover:bg-white/10 transition-colors"
+                        >
+                          ✕
+                        </button>
+                      </Form>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
           </div>
         )}
 
@@ -286,7 +310,17 @@ export default function Admin() {
 
         {/* Pending confirmation */}
         <div className="gradient-border rounded-2xl p-6 mb-6">
-          <h2 className="font-playfair text-xl mb-2">Pending confirmation</h2>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="font-playfair text-xl">Pending confirmation</h2>
+            <button
+              type="button"
+              onClick={() => revalidator.revalidate()}
+              disabled={revalidator.state !== 'idle'}
+              className="px-3 py-1.5 border border-white/15 text-white/70 text-sm rounded-lg hover:bg-white/10 transition-colors disabled:opacity-50"
+            >
+              {revalidator.state === 'idle' ? '↻ Refresh' : 'Refreshing…'}
+            </button>
+          </div>
           <p className="text-white/60 text-sm mb-4">
             Paid bookings awaiting your decision. Confirm to add it to the calendar, or
             decline to reject it (PayPal payments are refunded automatically).
