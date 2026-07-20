@@ -56,7 +56,11 @@ export interface BookingRow {
   paid_amount: number | null;
   refund_ref: string | null;
   refunded_at: string | null;
+  // Non-null = the customer hasn't been told about this decision yet.
+  pending_notification: 'confirmed' | 'declined' | 'rescheduled' | null;
 }
+
+export type NotificationKind = NonNullable<BookingRow['pending_notification']>;
 
 export type ReserveResult =
   | { ok: true; reservation: BookingRow; amountZar: number }
@@ -203,7 +207,7 @@ export async function markConfirmed(
 ): Promise<ConfirmResult> {
   const { data, error } = await supabaseAdmin
     .from('bookings')
-    .update({ status: 'confirmed', google_event_id: googleEventId })
+    .update({ status: 'confirmed', google_event_id: googleEventId, pending_notification: 'confirmed' })
     .eq('id', reservationId)
     .in('status', ['paid', 'pending'])
     .select('*')
@@ -278,6 +282,7 @@ export async function rescheduleBooking(
       booking_time: bookingTime,
       start_at: timing.start_at,
       end_at: timing.end_at,
+      pending_notification: 'rescheduled',
     })
     .eq('id', reservationId)
     .eq('status', 'paid')
@@ -373,6 +378,40 @@ export async function getAwaitingDecision(): Promise<BookingRow[]> {
     return [];
   }
   return ((data as BookingRow[]) ?? []).map(decryptRow);
+}
+
+/**
+ * Bookings whose latest decision the customer hasn't been told about yet.
+ * Drives the persistent "To notify" list in /admin.
+ */
+export async function getNotificationQueue(): Promise<BookingRow[]> {
+  const { data, error } = await supabaseAdmin
+    .from('bookings')
+    .select('*')
+    .not('pending_notification', 'is', null)
+    .order('start_at', { ascending: true })
+    .limit(50);
+  if (error) {
+    console.error('[bookings] getNotificationQueue failed:', error);
+    return [];
+  }
+  return ((data as BookingRow[]) ?? []).map(decryptRow);
+}
+
+/**
+ * Sets (or clears, with null) the customer-notification flag. Declines are
+ * queued from the admin action only after the refund outcome is known, so the
+ * pre-written "you have been refunded" message is never queued prematurely.
+ */
+export async function setPendingNotification(
+  reservationId: string,
+  kind: NotificationKind | null,
+): Promise<void> {
+  const { error } = await supabaseAdmin
+    .from('bookings')
+    .update({ pending_notification: kind })
+    .eq('id', reservationId);
+  if (error) console.error('[bookings] setPendingNotification failed:', error);
 }
 
 /**
